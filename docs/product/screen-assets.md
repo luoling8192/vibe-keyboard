@@ -101,7 +101,7 @@ An available assets block has exactly this shape; values are examples, not defau
   "max_frames": 1,
   "min_frame_ms": 1,
   "max_frame_ms": 65535,
-  "max_active_decoded_bytes": 243104,
+  "max_active_decoded_bytes": 247200,
   "decoder_scratch_bytes": 4096,
   "encodings": ["raw", "row_rle"],
   "revision": 0
@@ -390,6 +390,13 @@ Widget update is exact type-`0x10` JSON. `value` is required for fresh and its J
 ```
 
 Every validated fresh/stale/error update consumes the nonzero UInt32 sequence. Serial comparison rejects stale/equal/half-range values. Fresh stores/renders the new value. Stale/error discard any prior fresh value and render the declaration fallback; reconnect, lease expiry, reboot, and newer layout do the same and reset sequence ownership to that layout. Updates are RAM-only and never publish a revision. Success emits exact `{"event":"vk_widget_applied","revision":7,"widget_id":"cpu","sequence":19,"state":"fresh"}` only after LVGL-model application, so the host may claim rendered only after that acknowledgement. Failure is exact `vk_error` operation `widget`, code from `not_configured|wrong_revision|not_found|stale_sequence|type_mismatch|out_of_range|too_large|invalid_state|internal`, optional safely parsed widget/sequence, and optional 96-byte diagnostic message.
+
+The macOS client's live-dashboard policy is not an additional protocol
+feature. It persists one layout with six text widgets arranged as two
+horizontal tiles (title plus two value rows per tile), then uses ordinary
+RAM-only widget updates to alternate four user-selected module slots between
+Page A and Page B. Stock rows use the same update path and never advance the
+screen revision.
 
 Fonts are firmware-owned versioned capability descriptors. Each descriptor maps by exact `(id,version)` to one immutable repository file `docs/product/fixtures/fonts/<id>-v<version>.metrics.json`. The production `vk-sans-v1.metrics.json` fixture covers every printable ASCII glyph compiled from LVGL Montserrat 14; its unkerned advances and bearings are the values advertised by firmware and used by Swift preview. The file is canonical UTF-8 without BOM/newline and has exact top-level keys `ascent,descent,glyphs,line_height,version`. Metrics are signed Int16 `ascent,descent`; `line_height` is positive UInt16; `version` equals the descriptor version. `glyphs` is a nonempty array sorted by scalar value, with exact entry keys `advance,bearing_x,bearing_y,scalar`; scalar is uppercase `U+` plus exactly 4 or 6 hexadecimal digits, denotes one valid Unicode scalar (never surrogate/noncharacter), and is unique. Advance is positive UInt16; bearings are Int16. `metrics_sha256` is SHA-256 of the complete file bytes. Firmware generated source and Swift preview are generated from that same immutable file and embed/assert the same digest; neither reconstructs data from the digest. A layout must match advertised ID/version/hash. Unsupported glyphs reject layout/text updates; no implicit fallback or ellipsis exists. Non-ASCII content remains available through uploaded image or animation assets.
 

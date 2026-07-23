@@ -99,11 +99,11 @@ static void test_active_asset_transfer(void)
     reset_in(&f);f.output_count=0;frame(&f,json);all(s,&f);assert(commands==1&&contains(&f,"vk_asset_ready"));
     uint8_t chunk1[]={9,0,0,0,0,0,0,0,1,2,3,4};reset_in(&f);f.output_count=0;frame_t(&f,VK_USB_FRAME_TYPE_ASSET_CHUNK,chunk1,sizeof(chunk1));all(s,&f);assert(chunks==1&&last_chunk.expected_epoch!=0U&&last_chunk.snapshot_generation!=0U&&last_chunk.offset==0&&last_chunk.payload_length==4&&contains(&f,"\"next_offset\":4"));
     reset_in(&f);f.output_count=0;frame_t(&f,VK_USB_FRAME_TYPE_ASSET_CHUNK,chunk1,sizeof(chunk1));all(s,&f);assert(chunks==1&&contains(&f,"bad_offset")&&contains(&f,"\"next_offset\":4"));
-    uint8_t final[]={9,0,0,0,4,0,0,0,5};chunk_result=ESP_FAIL;reset_in(&f);f.output_count=0;frame_t(&f,VK_USB_FRAME_TYPE_ASSET_CHUNK,final,sizeof(final));all(s,&f);assert(chunks==2&&contains(&f,"write_failed")&&contains(&f,"\"next_offset\":4"));
+    uint8_t final[]={9,0,0,0,4,0,0,0,5};chunk_result=ESP_FAIL;reset_in(&f);f.output_count=0;frame_t(&f,VK_USB_FRAME_TYPE_ASSET_CHUNK,final,sizeof(final));all(s,&f);assert(chunks==2&&contains(&f,"write_failed")&&contains(&f,"phase=chunk;esp_err=0xffffffff")&&contains(&f,"\"next_offset\":4"));
     chunk_result=ESP_OK;reset_in(&f);f.output_count=0;frame_t(&f,VK_USB_FRAME_TYPE_ASSET_CHUNK,final,sizeof(final));all(s,&f);assert(chunks==3&&contains(&f,"\"next_offset\":5"));
-    snprintf(json,sizeof(json),"{\"event\":\"vk_asset_end\",\"transfer_id\":9,\"sha256\":\"%s\",\"total_bytes\":5,\"kind\":\"image\"}",sha);reset_in(&f);f.output_count=0;frame(&f,json);all(s,&f);assert(commands==2&&contains(&f,"vk_asset_stored"));
+    snprintf(json,sizeof(json),"{\"event\":\"vk_asset_end\",\"transfer_id\":9,\"sha256\":\"%s\",\"total_bytes\":5,\"kind\":\"image\"}",sha);command_result=ESP_FAIL;reset_in(&f);f.output_count=0;frame(&f,json);all(s,&f);assert(commands==2&&contains(&f,"write_failed")&&contains(&f,"phase=end;esp_err=0xffffffff"));command_result=ESP_OK;reset_in(&f);f.output_count=0;frame(&f,json);all(s,&f);assert(commands==3&&contains(&f,"vk_asset_stored"));
     reset_in(&f);f.output_count=0;frame_t(&f,VK_USB_FRAME_TYPE_ASSET_CHUNK,final,sizeof(final));all(s,&f);assert(chunks==3&&contains(&f,"unavailable"));
-    reset_in(&f);f.output_count=0;frame(&f,"{\"event\":\"vk_asset_abort\",\"transfer_id\":9}");all(s,&f);assert(commands==2&&contains(&f,"vk_asset_aborted"));
+    reset_in(&f);f.output_count=0;frame(&f,"{\"event\":\"vk_asset_abort\",\"transfer_id\":9}");all(s,&f);assert(commands==3&&contains(&f,"vk_asset_aborted"));
     assert(vk_usb_service_stop(s)==ESP_OK);free(s);
 }
 

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 import VibeBoardKit
@@ -22,6 +23,9 @@ struct RootView: View {
         }
         .frame(minWidth: 900, minHeight: 620)
         .task { model.start() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            model.refreshInputPermission()
+        }
     }
 
     @ViewBuilder private var page: some View {
@@ -42,6 +46,11 @@ private struct PageTitle: View {
 }
 
 private struct DevicePreview: View {
+    private struct PreviewLabel {
+        let text: String
+        let colorRGB888: UInt32
+    }
+
     let mode: String
     let pixels: [UInt16]?
     let layout: ScreenLayout?
@@ -76,20 +85,95 @@ private struct DevicePreview: View {
 
     @ViewBuilder private func layoutPreview(_ layout: ScreenLayout, size: CGSize) -> some View {
         let placements = (try? ScreenLayoutGeometry.placements(layout)) ?? []
+        let labels = previewLabels(layout)
         let sx = size.width / 428
         let sy = size.height / 142
         ZStack(alignment: .topLeading) {
-            Color(red: Double((layout.backgroundRGB888 >> 16) & 0xff) / 255,
-                  green: Double((layout.backgroundRGB888 >> 8) & 0xff) / 255,
-                  blue: Double(layout.backgroundRGB888 & 0xff) / 255)
+            color(layout.backgroundRGB888)
             ForEach(Array(placements.enumerated()), id: \.offset) { _, placement in
-                RoundedRectangle(cornerRadius: 2)
-                    .stroke(Color.cyan.opacity(0.8), lineWidth: 1)
-                    .overlay(Text(placement.id).font(.caption2).foregroundStyle(.white))
-                    .frame(width: CGFloat(placement.rect.width) * sx, height: CGFloat(placement.rect.height) * sy)
-                    .offset(x: CGFloat(placement.rect.x) * sx, y: CGFloat(placement.rect.y) * sy)
+                if let label = labels[placement.id] {
+                    Text(label.text)
+                        .font(.system(
+                            size: max(7, 13 * sy),
+                            weight: placement.id.contains("title") ? .semibold : .regular,
+                            design: .monospaced
+                        ))
+                        .foregroundStyle(color(label.colorRGB888))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                        .frame(
+                            width: CGFloat(placement.rect.width) * sx,
+                            height: CGFloat(placement.rect.height) * sy,
+                            alignment: .leading
+                        )
+                        .offset(
+                            x: CGFloat(placement.rect.x) * sx,
+                            y: CGFloat(placement.rect.y) * sy
+                        )
+                } else {
+                    RoundedRectangle(cornerRadius: 2)
+                        .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                        .overlay(
+                            Text(placement.id)
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.7))
+                        )
+                        .frame(
+                            width: CGFloat(placement.rect.width) * sx,
+                            height: CGFloat(placement.rect.height) * sy
+                        )
+                        .offset(
+                            x: CGFloat(placement.rect.x) * sx,
+                            y: CGFloat(placement.rect.y) * sy
+                        )
+                }
             }
         }
+    }
+
+    private func previewLabels(_ layout: ScreenLayout) -> [String: PreviewLabel] {
+        var widgetFallbacks: [String: String] = [:]
+        for declaration in layout.widgets {
+            let widgetID: String
+            switch declaration {
+            case .text(let id, _, _), .integer(let id, _, _),
+                 .number(let id, _, _, _, _, _), .progress(let id, _, _, _, _, _):
+                widgetID = id
+            }
+            if let fallback = try? WidgetPreviewFormatter.fallback(declaration) {
+                widgetFallbacks[widgetID] = fallback
+            }
+        }
+
+        var labels: [String: PreviewLabel] = [:]
+        func collect(_ node: ScreenObjectNode) {
+            switch node {
+            case .staticLabel(let base, _, let color, _, let text):
+                labels[base.id] = .init(text: text, colorRGB888: color)
+            case .dynamicLabel(let base, _, let color, _, let widgetID):
+                if let text = widgetFallbacks[widgetID] {
+                    labels[base.id] = .init(text: text, colorRGB888: color)
+                }
+            case .iconText(let base, let color, _, _, _, let widgetID):
+                if let text = widgetFallbacks[widgetID] {
+                    labels[base.id] = .init(text: text, colorRGB888: color)
+                }
+            case .container(_, _, _, _, _, let children):
+                children.forEach(collect)
+            case .image, .pet, .glyphLabel, .progress:
+                break
+            }
+        }
+        layout.objects.forEach { collect($0.node) }
+        return labels
+    }
+
+    private func color(_ rgb: UInt32) -> Color {
+        Color(
+            red: Double((rgb >> 16) & 0xff) / 255,
+            green: Double((rgb >> 8) & 0xff) / 255,
+            blue: Double(rgb & 0xff) / 255
+        )
     }
 
     private func previewImage(_ pixels: [UInt16]) -> CGImage? {
@@ -147,7 +231,7 @@ private struct DevicePage: View {
             CapabilityRow(name: "Assets", value: model.assetsCapability)
             CapabilityRow(name: "Screen", value: model.screenCapability)
             CapabilityRow(name: "LED", value: model.ledCapability)
-            CapabilityRow(name: "Update", value: model.updateCapability)
+            CapabilityRow(name: "Firmware updates", value: model.updateCapability)
             Button("Reconnect") { model.reconnect() }
                 .disabled(model.isConnected)
                 .keyboardShortcut("r", modifiers: [.command])
@@ -167,12 +251,14 @@ private struct ScreenPage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                HStack { PageTitle(title: "Screen"); Spacer(); Button("Import…") { importerPresented = true }.disabled(!model.assetsCapability.isAvailable) }
+                HStack { PageTitle(title: "Screen"); Spacer(); Button("Import & Upload…") { importerPresented = true }.disabled(!model.canUploadAssets) }
                 ViewThatFits(in: .horizontal) {
                     HStack(alignment: .top, spacing: 20) { DevicePreview(mode: model.screenMode.rawValue.capitalized, pixels: model.previewPixels, layout: model.previewLayout); inspector.frame(width: 260) }
                     VStack(alignment: .leading, spacing: 20) { DevicePreview(mode: model.screenMode.rawValue.capitalized, pixels: model.previewPixels, layout: model.previewLayout); inspector }
                 }
                 Text("Upload: \(model.upload.label)").foregroundStyle(.secondary)
+                Text("Storage: \(model.assetStorageLabel)")
+                    .foregroundStyle(model.canUploadAssets ? Color.secondary : Color.orange)
                 ProgressView(value: model.uploadProgress).opacity(model.activeTransferID == nil ? 0 : 1)
                 if model.activeTransferID != nil { Button("Cancel upload", role: .cancel) { model.cancelUpload() } }
             }.padding(24)
@@ -200,12 +286,58 @@ private struct ScreenPage: View {
             case .pet:
                 Button("Commit pet states") { model.activateUploadedPet() }
                     .disabled(!model.canSendScreen || model.lastUploadedAsset?.kind != .animation)
-            case .dashboard, .custom:
+            case .dashboard:
+                Text("Two tiles are shown at once. Page A and Page B rotate automatically.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(0..<4, id: \.self) { index in
+                    Picker(
+                        Self.dashboardSlotLabels[index],
+                        selection: Binding(
+                            get: {
+                                LiveDashboardSnapshot
+                                    .normalizedModules(model.dashboardModules)[index]
+                            },
+                            set: { model.setDashboardModule($0, at: index) }
+                        )
+                    ) {
+                        ForEach(DashboardModule.allCases) { module in
+                            Text(module.label).tag(module)
+                        }
+                    }
+                }
+                Picker("Page rotation", selection: $model.dashboardPageDurationSeconds) {
+                    ForEach([4, 6, 8, 10, 12], id: \.self) { seconds in
+                        Text("\(seconds) seconds").tag(seconds)
+                    }
+                }
+                TextField(
+                    "Stocks, up to 12 (sh000001,hk00700,usAAPL)",
+                    text: $model.stockSymbols
+                )
+                HStack {
+                    Button("Save") { model.saveDashboardSettings() }
+                    Button(model.liveDashboardEnabled ? "Reinstall" : "Install & start") {
+                        model.saveDashboardSettings()
+                        model.activateLiveDashboard()
+                    }
+                    .disabled(!model.canSendScreen)
+                }
+                if model.liveDashboardEnabled {
+                    Button("Pause live updates") { model.stopLiveDashboard() }
+                }
+                dashboardPagePreview("Page A", page: model.dashboardPageA)
+                dashboardPagePreview("Page B", page: model.dashboardPageB)
+                Text("Stock tiles show two quotes and advance every 4 seconds.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Codex quota comes from the installed Codex CLI. Claude daily tokens come from local session logs. Credentials are not copied to the device.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .custom:
                 TextField("Title (printable ASCII)", text: $model.layoutTitle)
                 TextField("Status (printable ASCII)", text: $model.widgetText)
-                Button(model.screenMode == .dashboard ? "Commit dashboard" : "Commit custom layout") {
-                    model.activateLayout(mode: model.screenMode == .dashboard ? .dashboard : .custom)
-                }
+                Button("Commit custom layout") { model.activateLayout(mode: .custom) }
                     .disabled(!model.canSendScreen)
                 Button("Send widget update") { model.sendStatusWidget() }
                     .disabled(model.availableScreen?.configured != true)
@@ -215,6 +347,39 @@ private struct ScreenPage: View {
             Text(model.screenCapability.label).font(.caption).foregroundStyle(.secondary)
         }.padding().background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
     }
+
+    private static let dashboardSlotLabels = [
+        "Page A · Left",
+        "Page A · Right",
+        "Page B · Left",
+        "Page B · Right",
+    ]
+
+    private func dashboardPagePreview(
+        _ title: String,
+        page: DashboardPageContent
+    ) -> some View {
+        GroupBox(title) {
+            HStack(alignment: .top, spacing: 10) {
+                dashboardTilePreview(page.left)
+                Divider()
+                dashboardTilePreview(page.right)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func dashboardTilePreview(_ tile: DashboardTileContent) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(tile.title).fontWeight(.semibold)
+            Text(tile.line1)
+            Text(tile.line2).foregroundStyle(.secondary)
+        }
+        .font(.system(.caption2, design: .monospaced))
+        .lineLimit(1)
+        .minimumScaleFactor(0.65)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
 private struct PetsPage: View {
@@ -223,29 +388,85 @@ private struct PetsPage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                HStack { PageTitle(title: "Pets"); Spacer(); Button("Import GIF/APNG") { importerPresented = true }.disabled(!model.assetsCapability.isAvailable) }
-                TextField("Search", text: .constant("")).disabled(true)
-                VStack(spacing: 10) {
-                    Image(systemName: "pawprint").font(.largeTitle).foregroundStyle(.secondary)
-                    Text("No pet library yet").font(.headline)
-                    Text("Import a bounded GIF or APNG to create explicit semantic states.").foregroundStyle(.secondary)
+                HStack {
+                    PageTitle(title: "Pets")
+                    Spacer()
+                    Button("Refresh Petdex") { model.refreshPetdex() }
+                    Button("Import GIF/APNG") { importerPresented = true }
+                        .disabled(!model.canUploadAssets)
                 }
-                .frame(maxWidth: .infinity, minHeight: 140)
-                GroupBox("Selected animation states") {
-                    Grid(alignment: .leading) {
-                        GridRow { Text("Idle"); Text("Required") }
-                        GridRow { Text("Active"); Text("Idle fallback") }
-                        GridRow { Text("Success"); Text("Idle fallback") }
-                        GridRow { Text("Error"); Text("Idle fallback") }
+                TextField("Search local and Petdex pets", text: $model.petSearch)
+                HStack(alignment: .top, spacing: 20) {
+                    List(model.filteredPets, selection: $model.selectedPetID) { pet in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(pet.displayName)
+                            Text(pet.attribution)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .tag(pet.id)
                     }
+                    .frame(minWidth: 300, idealWidth: 360, minHeight: 280)
+
+                    petInspector
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                Button("Commit selected pet") { model.activateUploadedPet() }
-                    .disabled(!model.canSendScreen || model.lastUploadedAsset?.kind != .animation)
                 Text(model.upload.label).foregroundStyle(.secondary)
+                Text(model.petCatalogStatus).foregroundStyle(.secondary)
+                Text("Storage: \(model.assetStorageLabel)")
+                    .foregroundStyle(model.canUploadAssets ? Color.secondary : Color.orange)
+                Text("Petdex entries are user-submitted. The app downloads the selected spritesheet on demand and keeps its submitter attribution; assets are not bundled into this repository.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }.padding(24)
         }
         .fileImporter(isPresented: $importerPresented, allowedContentTypes: [.gif, .png]) { result in
             if case .success(let url) = result { model.importAndUpload(url: url, pet: true) }
+        }
+    }
+
+    @ViewBuilder private var petInspector: some View {
+        if let pet = model.selectedPet {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(pet.displayName).font(.title2.bold())
+                LabeledContent("Source", value: pet.source.label)
+                LabeledContent("Attribution", value: pet.submittedBy ?? "Local")
+                LabeledContent("Kind", value: pet.kind)
+                Picker("Animation", selection: $model.petAnimationChoice) {
+                    ForEach(PetAnimationChoice.allCases) { choice in
+                        Text(choice.label).tag(choice)
+                    }
+                }
+                .frame(maxWidth: 260)
+                Text("The selected row is converted to the device's bounded animation format and loops as the pet's idle state.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Download & upload") { model.downloadSelectedPet() }
+                        .disabled(!model.canUploadAssets)
+                    Button("Commit to display") { model.activateUploadedPet() }
+                        .disabled(
+                            !model.canSendScreen ||
+                            model.lastUploadedAsset?.kind != .animation ||
+                            (model.uploadedPetID != nil && model.uploadedPetID != pet.id)
+                        )
+                }
+                DevicePreview(
+                    mode: "Pet",
+                    pixels: model.previewPixels,
+                    layout: nil
+                )
+            }
+        } else {
+            VStack(spacing: 10) {
+                Image(systemName: "pawprint")
+                    .font(.largeTitle)
+                    .foregroundStyle(.secondary)
+                Text("Select a pet").font(.headline)
+                Text("Local Codex pets load automatically. Refresh Petdex for the public catalog.")
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 280)
         }
     }
 }
@@ -257,10 +478,11 @@ private struct KeysPage: View {
     @State private var shortcutKey = "k"
     @State private var shortcutCommand = true
     @State private var shortcutControl = false
+    @State private var shortcutFunction = false
     @State private var shortcutOption = false
     @State private var shortcutShift = false
-    @State private var commandExecutable = "/usr/bin/true"
-    @State private var commandArguments = ""
+    @State private var commandExecutable = "/usr/bin/open"
+    @State private var commandArguments = "-a\nTextEdit"
     @State private var commandTimeout = "5000"
     @State private var bundleIdentifier = "com.apple.TextEdit"
 
@@ -269,6 +491,20 @@ private struct KeysPage: View {
             VStack(alignment: .leading, spacing: 20) {
                 PageTitle(title: "Keys")
                 Text("Physical order: Not calibrated").foregroundStyle(.secondary)
+                GroupBox("Shortcut permission") {
+                    HStack {
+                        Label(
+                            model.inputPermissionGranted ? "Accessibility access granted" : "Accessibility access required",
+                            systemImage: model.inputPermissionGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(model.inputPermissionGranted ? .green : .orange)
+                        Spacer()
+                        if !model.inputPermissionGranted {
+                            Button("Open Accessibility Settings") { model.requestInputPermission() }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
                 HStack(spacing: 20) {
                     ForEach(CanonicalKey.allCases, id: \.self) { key in
                         Button(key.rawValue) { model.selectedKey = key }
@@ -294,10 +530,32 @@ private struct KeysPage: View {
                         .frame(maxWidth: 360)
 
                         actionParameters
+                        Divider()
+                        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
+                            ForEach(KeyGesture.allCases, id: \.self) { gesture in
+                                GridRow {
+                                    Text(gestureLabel(gesture)).foregroundStyle(.secondary)
+                                    Text(ActionChoice(binding(model.selectedKey)[gesture]).label)
+                                }
+                            }
+                        }
                     }
                     .padding(.vertical, 6)
                 }
-                HStack { Spacer(); Button("Save mapping") { model.saveMappings() } }
+                HStack {
+                    Button("Test selected action") { model.testAction(currentAction) }
+                    Button("Clear selected gesture") {
+                        model.setAction(.none, for: model.selectedKey, gesture: selectedGesture)
+                    }
+                    Spacer()
+                    Button("Save mapping") { model.saveMappings() }
+                }
+                if let result = model.lastActionResult {
+                    LabeledContent("Last action", value: result)
+                }
+                if let message = model.diagnosticMessage {
+                    Text(message).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+                }
             }.padding(24)
         }
         .onAppear { loadDrafts() }
@@ -326,11 +584,12 @@ private struct KeysPage: View {
             }
             .disabled(textDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         case .customShortcut:
-            TextField("Single shortcut key", text: $shortcutKey)
+            TextField("Key (1, fn, f1…f20, home, pageup)", text: $shortcutKey)
                 .frame(maxWidth: 240)
             HStack {
                 Toggle("Command", isOn: $shortcutCommand)
                 Toggle("Control", isOn: $shortcutControl)
+                Toggle("Fn", isOn: $shortcutFunction)
                 Toggle("Option", isOn: $shortcutOption)
                 Toggle("Shift", isOn: $shortcutShift)
             }
@@ -342,6 +601,9 @@ private struct KeysPage: View {
                 model.setAction(.customShortcut(shortcut), for: model.selectedKey, gesture: selectedGesture)
             }
             .disabled(!shortcutIsValid)
+            Text(shortcutPreview)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
         case .customCommand:
             TextField("Absolute executable path", text: $commandExecutable)
             TextEditor(text: $commandArguments)
@@ -353,6 +615,9 @@ private struct KeysPage: View {
                 }
             TextField("Timeout in milliseconds", text: $commandTimeout)
                 .frame(maxWidth: 240)
+            Text("The executable runs directly without a shell. Enter each literal argument on its own line.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Button("Apply command") {
                 guard let timeout = UInt32(commandTimeout),
                       let command = try? CommandSpecification(
@@ -382,19 +647,40 @@ private struct KeysPage: View {
         var result: Set<VibeBoardKit.KeyboardShortcut.Modifier> = []
         if shortcutCommand { result.insert(.command) }
         if shortcutControl { result.insert(.control) }
+        if shortcutFunction { result.insert(.function) }
         if shortcutOption { result.insert(.option) }
         if shortcutShift { result.insert(.shift) }
         return result
     }
 
     private var shortcutIsValid: Bool {
-        shortcutKey.unicodeScalars.count == 1 &&
-        "abcdefghijklmnopqrstuvwxyz1234567890=-[];'\\,./`".contains(shortcutKey.lowercased())
+        ProductionHostActionAdapter.keyCode(forShortcutKey: shortcutKey) != nil
     }
 
     private var commandIsValid: Bool {
         commandExecutable.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") &&
         UInt32(commandTimeout).map { $0 > 0 && $0 <= 300_000 } == true
+    }
+
+    private var shortcutPreview: String {
+        let names = shortcutModifiers.sorted().map {
+            switch $0 {
+            case .command: "Command"
+            case .control: "Control"
+            case .function: "Fn"
+            case .option: "Option"
+            case .shift: "Shift"
+            }
+        }
+        return (names + [shortcutKey.lowercased()]).joined(separator: " + ")
+    }
+
+    private func gestureLabel(_ gesture: KeyGesture) -> String {
+        switch gesture {
+        case .single: "Click"
+        case .double: "Double click"
+        case .long: "Long press"
+        }
     }
 
     private func loadDrafts() {
@@ -405,6 +691,7 @@ private struct KeysPage: View {
             shortcutKey = shortcut.key
             shortcutCommand = shortcut.modifiers.contains(.command)
             shortcutControl = shortcut.modifiers.contains(.control)
+            shortcutFunction = shortcut.modifiers.contains(.function)
             shortcutOption = shortcut.modifiers.contains(.option)
             shortcutShift = shortcut.modifiers.contains(.shift)
         case .customCommand(let command):
@@ -474,7 +761,7 @@ private enum ActionChoice: String, CaseIterable, Hashable {
             (try? VibeBoardKit.KeyboardShortcut(modifiers: [.command], key: "k"))
                 .map { .customShortcut($0) } ?? .none
         case .command:
-            (try? CommandSpecification(executable: "/usr/bin/true", timeoutMilliseconds: 5_000))
+            (try? CommandSpecification(executable: "/usr/bin/open", arguments: ["-a", "TextEdit"], timeoutMilliseconds: 5_000))
                 .map { .customCommand($0) } ?? .none
         case .launch: .launchApplication(bundleIdentifier: "com.apple.TextEdit")
         case .screenImage: .screenMode(.image)
@@ -490,8 +777,18 @@ private struct AudioPage: View {
     var body: some View {
         Form {
             PageTitle(title: "Audio")
-            LabeledContent("State", value: String(describing: model.audioState))
-            Text("Replacement: use the configured canonical voice key. No host-start command is sent.")
+            LabeledContent("State", value: stateLabel)
+            Picker("Voice key", selection: Binding<CanonicalKey?>(
+                get: { model.configuredVoiceKey },
+                set: { model.setVoiceKey($0) }
+            )) {
+                Text("Disabled").tag(Optional<CanonicalKey>.none)
+                ForEach(CanonicalKey.allCases, id: \.self) { key in
+                    Text(key.rawValue.uppercased()).tag(Optional(key))
+                }
+            }
+            Text("The selected key's single-click action becomes Voice input. The device starts and stops capture; the Mac only receives Opus audio over USB.")
+                .font(.caption).foregroundStyle(.secondary)
             Picker("Interaction", selection: Binding(
                 get: { model.interactionMode },
                 set: { model.setInteractionMode($0) }
@@ -505,7 +802,27 @@ private struct AudioPage: View {
                 .font(.caption).foregroundStyle(.secondary)
             Text("Recognition: unavailable until a reviewed provider contract exists").foregroundStyle(.secondary)
             LabeledContent("Last recording", value: model.lastRecording)
+            if let message = model.diagnosticMessage {
+                Text(message).font(.caption).foregroundStyle(.red).textSelection(.enabled)
+            }
         }.formStyle(.grouped).padding(8)
+    }
+
+    private var stateLabel: String {
+        switch model.audioState {
+        case .ready:
+            return model.configuredVoiceKey == nil ? "Disabled — select a voice key" : "Ready"
+        case .recording:
+            return "Recording"
+        case .finalizing:
+            return "Finalizing"
+        case .completed(_, let packetCount):
+            return "Completed — \(packetCount) packets"
+        case .cancelled:
+            return "Cancelled"
+        case .failed(let error):
+            return "Failed — \(String(describing: error))"
+        }
     }
 }
 
@@ -514,7 +831,9 @@ private struct FirmwarePage: View {
     var body: some View {
         Form {
             PageTitle(title: "Firmware")
-            LabeledContent("Update", value: model.updateCapability.label)
+            LabeledContent("In-app update", value: model.updateCapability.label)
+            Text("Firmware updates use the ROM flash tool. Keys, screen uploads, and audio remain available.")
+                .font(.caption).foregroundStyle(.secondary)
             LabeledContent("Local backup evidence", value: "Not verified in this session")
             LabeledContent("Candidate image", value: "Not selected")
             HStack {

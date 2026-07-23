@@ -175,6 +175,11 @@ public enum USBSessionEvent: Equatable, Sendable {
 public struct USBDiagnostics: Equatable, Sendable {
     public let text: String
     public let entries: [String]
+
+    public init(text: String, entries: [String]) {
+        self.text = text
+        self.entries = entries
+    }
 }
 
 private struct CapabilityIdentity: Equatable, Sendable {
@@ -472,16 +477,24 @@ public actor USBSession {
             throw USBSessionError.protocolFailure("invalid asset chunk size")
         }
         let next = authorization.nextOffset + UInt32(payload.count)
-        try await performWrite(timeout: timeout) {
-            try AssetChunkEncoder.encode(
-                transferID: authorization.transferID,
-                nextOffset: authorization.nextOffset,
-                payload: payload
-            )
-        }
-        try requireUnchanged(context)
         active.awaitingProgress = next
         activeAssetTransfer = active
+        do {
+            try await performWrite(timeout: timeout) {
+                try AssetChunkEncoder.encode(
+                    transferID: authorization.transferID,
+                    nextOffset: authorization.nextOffset,
+                    payload: payload
+                )
+            }
+            try requireUnchanged(context)
+        } catch {
+            if activeAssetTransfer?.handle.authorizationID == authorization.authorizationID,
+               activeAssetTransfer?.awaitingProgress == next {
+                activeAssetTransfer?.awaitingProgress = nil
+            }
+            throw error
+        }
     }
 
     public func currentActiveAssetTransfer() -> ActiveAssetTransfer? {
@@ -725,8 +738,13 @@ public actor USBSession {
                 throw USBSessionError.protocolFailure("replacement event without current capabilities")
             }
             let replacement: ReplacementProtocolEvent
-            do { replacement = try ReplacementEventDecoder.decode(body) }
-            catch { throw USBSessionError.protocolFailure("invalid replacement event") }
+            do {
+                replacement = try ReplacementEventDecoder.decode(body)
+            } catch {
+                let payload = String(decoding: body.prefix(256), as: UTF8.self)
+                appendEntry("replacement decode failed event=\(eventName) body=\(payload)")
+                throw USBSessionError.protocolFailure("invalid replacement event")
+            }
             let event = try FrameDecoder.decodeState(raw.bytes)
             try consumeHandshakeEvent(event)
             try consumeReplacementEvent(replacement)
@@ -908,7 +926,7 @@ public actor USBSession {
                         nextOffset: error.nextOffset,
                         message: error.message
                     )
-                    clearAssetOperations(recordInvalidation: false)
+                    retainActiveAssetTransferForAbort(transferID: transferID)
                 } else {
                     if let transferID = activeAssetTransfer?.handle.transferID ?? pendingAssetBegin?.transferID {
                         assetTransferOutcomes[transferID] = .rejected(
@@ -918,7 +936,11 @@ public actor USBSession {
                             message: error.message
                         )
                     }
-                    clearAssetOperations(recordInvalidation: false)
+                    if let transferID = activeAssetTransfer?.handle.transferID {
+                        retainActiveAssetTransferForAbort(transferID: transferID)
+                    } else {
+                        clearAssetOperations(recordInvalidation: false)
+                    }
                 }
             }
         case .screen(let screen):
@@ -1163,7 +1185,12 @@ public actor USBSession {
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(for: self.heartbeatInterval)
-                    try await self.write(command: .ping)
+                    while self.writeInProgress {
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    try await self.performWrite(timeout: .seconds(2)) {
+                        try FrameEncoder.encode(.ping)
+                    }
                 } catch is CancellationError {
                     return
                 } catch let error as USBSessionError {
@@ -1186,6 +1213,19 @@ public actor USBSession {
         pendingAssetBegin = nil
         pendingAssetQueries.removeAll(keepingCapacity: true)
         activeAssetTransfer = nil
+    }
+
+    private func retainActiveAssetTransferForAbort(transferID: UInt32) {
+        pendingAssetBegin = nil
+        pendingAssetQueries.removeAll(keepingCapacity: true)
+        guard var active = activeAssetTransfer, active.handle.transferID == transferID else {
+            activeAssetTransfer = nil
+            return
+        }
+        active.awaitingProgress = nil
+        active.endRequested = false
+        active.abortRequested = false
+        activeAssetTransfer = active
     }
 
     private func clearPublishedReplacementContext() {

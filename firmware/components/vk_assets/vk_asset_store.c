@@ -224,7 +224,96 @@ esp_err_t vk_asset_store_seal(vk_asset_store_t *store, uint32_t transfer_id)
 esp_err_t vk_asset_store_abort(vk_asset_store_t*s,uint32_t id){if(!s||!id)return ESP_ERR_INVALID_ARG;if(!lock_store(s))return ESP_ERR_INVALID_STATE;if(!s->transfer_active||s->transfer.transfer_id!=id){unlock_store(s);return ESP_ERR_NOT_FOUND;}char p[96];pathf(p,sizeof(p),"/tmp/%08x.part",id);(void)s->config.fs->remove_file(s->config.fs_context,p);pathf(p,sizeof(p),"/tmp/%08x.meta",id);(void)s->config.fs->remove_file(s->config.fs_context,p);s->transfer_active=false;unlock_store(s);return ESP_OK;}
 
 static esp_err_t write_manifest(vk_asset_store_t*s,const char*name,const uint8_t*b,size_t n,uint8_t d[32]){vk_asset_sha256(b,n,d);return s->config.fs->write_new_file(s->config.fs_context,name,b,n,true);}
-esp_err_t vk_asset_store_publish_revision(vk_asset_store_t*s,const vk_asset_revision_t*r,uint8_t sd[32],uint8_t ad[32]){if(!s||!r||!sd||!ad||!r->revision||!r->assets_manifest||!r->screen_manifest||!r->assets_manifest_bytes||!r->screen_manifest_bytes)return ESP_ERR_INVALID_ARG;if(!lock_store(s))return ESP_ERR_INVALID_STATE;if(!s->mounted||s->state!=VK_ASSET_STORE_READY||r->previous_revision!=s->selected_revision||!vk_asset_revision_is_newer(r->revision,s->selected_revision)){unlock_store(s);return ESP_ERR_INVALID_STATE;}if(s->config.validate_revision){esp_err_t v=s->config.validate_revision(s->config.revision_context,r->revision,r->previous_revision,r->assets_manifest,r->assets_manifest_bytes,r->screen_manifest,r->screen_manifest_bytes);if(v!=ESP_OK){unlock_store(s);return v;}}char ap[96],sp[96],cp[96];pathf(ap,sizeof(ap),"/config/assets-r%08x.json",r->revision);pathf(sp,sizeof(sp),"/config/screen-r%08x.json",r->revision);pathf(cp,sizeof(cp),"/config/commit-r%08x.vkc",r->revision);esp_err_t e=write_manifest(s,ap,r->assets_manifest,r->assets_manifest_bytes,ad);if(e==ESP_OK)e=write_manifest(s,sp,r->screen_manifest,r->screen_manifest_bytes,sd);uint8_t c[VK_ASSET_COMMIT_BYTES]={0};memcpy(c,"VKC1",4);c[4]=1;put32(c+8,r->revision);put32(c+12,r->previous_revision);memcpy(c+16,sd,32);memcpy(c+48,ad,32);vk_asset_sha256(c,80,c+80);if(e==ESP_OK)e=s->config.fs->write_new_file(s->config.fs_context,cp,c,sizeof(c),true);if(e==ESP_OK){s->previous_revision=s->selected_revision;s->selected_revision=r->revision;}unlock_store(s);return e;}
+static esp_err_t remove_if_present(vk_asset_store_t *store, const char *path)
+{
+    esp_err_t result = store->config.fs->remove_file(store->config.fs_context, path);
+    return result == ESP_ERR_NOT_FOUND ? ESP_OK : result;
+}
+
+static esp_err_t remove_revision_candidate(vk_asset_store_t *store,
+                                           const char *assets_path,
+                                           const char *screen_path,
+                                           const char *commit_path)
+{
+    esp_err_t result = remove_if_present(store, commit_path);
+    if (result == ESP_OK) result = remove_if_present(store, assets_path);
+    if (result == ESP_OK) result = remove_if_present(store, screen_path);
+    return result;
+}
+
+esp_err_t vk_asset_store_publish_revision(vk_asset_store_t *store,
+                                           const vk_asset_revision_t *revision,
+                                           uint8_t screen_digest[32],
+                                           uint8_t assets_digest[32])
+{
+    if (store == NULL || revision == NULL || screen_digest == NULL ||
+        assets_digest == NULL || revision->revision == 0U ||
+        revision->assets_manifest == NULL || revision->screen_manifest == NULL ||
+        revision->assets_manifest_bytes == 0U ||
+        revision->screen_manifest_bytes == 0U) return ESP_ERR_INVALID_ARG;
+    if (!lock_store(store)) return ESP_ERR_INVALID_STATE;
+    if (!store->mounted || store->state != VK_ASSET_STORE_READY ||
+        revision->previous_revision != store->selected_revision ||
+        !vk_asset_revision_is_newer(revision->revision, store->selected_revision)) {
+        unlock_store(store);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (store->config.validate_revision != NULL) {
+        esp_err_t validated = store->config.validate_revision(
+            store->config.revision_context, revision->revision,
+            revision->previous_revision, revision->assets_manifest,
+            revision->assets_manifest_bytes, revision->screen_manifest,
+            revision->screen_manifest_bytes);
+        if (validated != ESP_OK) {
+            unlock_store(store);
+            return validated;
+        }
+    }
+
+    char assets_path[VK_ASSET_PATH_BYTES];
+    char screen_path[VK_ASSET_PATH_BYTES];
+    char commit_path[VK_ASSET_PATH_BYTES];
+    bool paths_valid =
+        pathf(assets_path, sizeof(assets_path),
+              "/config/assets-r%08x.json", revision->revision) &&
+        pathf(screen_path, sizeof(screen_path),
+              "/config/screen-r%08x.json", revision->revision) &&
+        pathf(commit_path, sizeof(commit_path),
+              "/config/commit-r%08x.vkc", revision->revision);
+    esp_err_t result = paths_valid
+        ? remove_revision_candidate(store, assets_path, screen_path, commit_path)
+        : ESP_ERR_INVALID_SIZE;
+    if (result == ESP_OK) {
+        result = write_manifest(store, assets_path, revision->assets_manifest,
+                                revision->assets_manifest_bytes, assets_digest);
+    }
+    if (result == ESP_OK) {
+        result = write_manifest(store, screen_path, revision->screen_manifest,
+                                revision->screen_manifest_bytes, screen_digest);
+    }
+
+    if (result == ESP_OK) {
+        uint8_t commit[VK_ASSET_COMMIT_BYTES] = {0};
+        memcpy(commit, "VKC1", 4U);
+        commit[4] = 1U;
+        put32(commit + 8U, revision->revision);
+        put32(commit + 12U, revision->previous_revision);
+        memcpy(commit + 16U, screen_digest, 32U);
+        memcpy(commit + 48U, assets_digest, 32U);
+        vk_asset_sha256(commit, 80U, commit + 80U);
+        result = store->config.fs->write_new_file(
+            store->config.fs_context, commit_path, commit, sizeof(commit), true);
+    }
+    if (result == ESP_OK) {
+        store->previous_revision = store->selected_revision;
+        store->selected_revision = revision->revision;
+    } else if (paths_valid) {
+        (void)remove_revision_candidate(
+            store, assets_path, screen_path, commit_path);
+    }
+    unlock_store(store);
+    return result;
+}
 static bool parse_revision_name(const char*n,const char*prefix,const char*suffix,uint32_t*r){unsigned v;char tail;char pattern[80];int pn=snprintf(pattern,sizeof(pattern),"%s%%8x%s%%c",prefix,suffix);if(pn<=0||(size_t)pn>=sizeof(pattern)||sscanf(n,pattern,&v,&tail)!=1)return false;*r=(uint32_t)v;char exact[96];int en=snprintf(exact,sizeof(exact),"%s%08x%s",prefix,v,suffix);return en>0&&(size_t)en<sizeof(exact)&&strcmp(exact,n)==0;}
 static bool parse_commit_name(const char*n,uint32_t*r){return parse_revision_name(n,"/config/commit-r",".vkc",r);}
 static esp_err_t validate_commit(vk_asset_store_t *store, uint32_t revision,

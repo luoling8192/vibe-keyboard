@@ -15,7 +15,7 @@ struct VibeKeyboardApplication: App {
                     model.selectedPage = .screen
                 }
                 .keyboardShortcut("o", modifiers: [.command])
-                .disabled(!model.assetsCapability.isAvailable)
+                .disabled(!model.canUploadAssets)
             }
         }
         Settings {

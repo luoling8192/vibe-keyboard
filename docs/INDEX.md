@@ -21,10 +21,3 @@
 ## UI
 
 - [macOS client layout](ui/client.md)
-
-## Delivery
-
-- [Delivery plan](plan/README.md)
-- [Analysis](plan/analysis/)
-- [Tasks](plan/tasks/)
-- [Backlog](plan/backlog.md)

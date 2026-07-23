@@ -1,10 +1,14 @@
 #include "vk_asset_transfer.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
 #ifndef ESP_ERR_NOT_FOUND
 #define ESP_ERR_NOT_FOUND 0x105
+#endif
+#ifndef ESP_ERR_INVALID_CRC
+#define ESP_ERR_INVALID_CRC 0x109
 #endif
 
 #define ASSET_RESERVE_FLOOR 1U
@@ -180,6 +184,7 @@ esp_err_t vk_asset_transfer_handle_command(void *context, const vk_usb_asset_com
     vk_asset_transfer_service_t *service = context;
     if (service == NULL || command == NULL || command->expected_epoch == 0U ||
         command->snapshot_generation == 0U) return ESP_ERR_INVALID_ARG;
+    service->last_error_detail[0] = '\0';
     if (command->kind == VK_USB_ASSET_BEGIN) return begin_or_resume(service, command);
     if (command->kind == VK_USB_ASSET_QUERY) {
         vk_asset_transfer_t transfer;
@@ -193,6 +198,20 @@ esp_err_t vk_asset_transfer_handle_command(void *context, const vk_usb_asset_com
     }
     if (command->kind == VK_USB_ASSET_END) {
         esp_err_t result = vk_asset_store_seal(service->config.store, command->transfer_id);
+        if (result == ESP_ERR_INVALID_CRC) {
+            char path[VK_ASSET_PATH_BYTES];
+            uint8_t actual[VK_ASSET_SHA256_BYTES];
+            int path_bytes = snprintf(
+                path, sizeof(path), "/tmp/%08" PRIx32 ".part", command->transfer_id);
+            if (path_bytes > 0 && (size_t)path_bytes < sizeof(path) &&
+                vk_asset_sha256_file(service->config.store, path, actual) == ESP_OK) {
+                char hash[65];
+                format_sha(actual, hash);
+                (void)snprintf(service->last_error_detail,
+                               sizeof(service->last_error_detail),
+                               "actual=%s", hash);
+            }
+        }
         if (result == ESP_OK) {
             service->transfer_deadline_ms = 0U;
             invalidate_catalog(service);
@@ -246,6 +265,15 @@ esp_err_t vk_asset_transfer_handle_command(void *context, const vk_usb_asset_com
         return ESP_OK;
     }
     return ESP_ERR_NOT_SUPPORTED;
+}
+
+static size_t error_detail(void *context, char *output, size_t capacity)
+{
+    vk_asset_transfer_service_t *service = context;
+    if (service == NULL || output == NULL || capacity == 0U ||
+        service->last_error_detail[0] == '\0') return 0U;
+    int written = snprintf(output, capacity, "%s", service->last_error_detail);
+    return written > 0 && (size_t)written < capacity ? (size_t)written : 0U;
 }
 
 esp_err_t vk_asset_transfer_handle_chunk(void *context, const vk_usb_asset_chunk_t *chunk)
@@ -350,6 +378,7 @@ void vk_asset_transfer_registration(vk_asset_transfer_service_t *service,
             .max_asset_bytes = service == NULL ? 0U : service->config.store->config.max_asset_bytes,
             .get_transfer_state = vk_asset_transfer_get_state,
             .build_event = build_event,
+            .error_detail = error_detail,
         };
     }
 }

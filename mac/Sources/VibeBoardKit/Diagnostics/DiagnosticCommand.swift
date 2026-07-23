@@ -7,6 +7,7 @@ public enum DiagnosticCLICommand: Equatable, Sendable {
     case handshake(timeoutSeconds: Int)
     case keys(durationSeconds: Int)
     case screen
+    case image(inputURL: URL)
     case record(outputURL: URL, timeoutSeconds: Int)
 }
 
@@ -14,6 +15,8 @@ public enum DiagnosticCLIError: Error, Equatable, Sendable {
     case usage
     case safeFlagRequired
     case invalidDuration
+    case missingInput
+    case invalidInput(String)
     case missingOutput
     case invalidOutput(String)
     case unsupportedOption(String)
@@ -27,6 +30,7 @@ public enum DiagnosticCLIParser {
       VibeBoardDiagnostic handshake --allow-safe-commands [--timeout 1...60]
       VibeBoardDiagnostic keys --allow-safe-commands [--duration 1...60]
       VibeBoardDiagnostic screen --allow-safe-commands
+      VibeBoardDiagnostic image --allow-safe-commands --input /absolute/image.jpg
       VibeBoardDiagnostic record --allow-safe-commands --output /absolute/private/file.ogg [--timeout 1...60]
     """
 
@@ -56,6 +60,11 @@ public enum DiagnosticCLIParser {
             try requireSafeFlag(options)
             try rejectOptions(options, allowed: ["--allow-safe-commands"])
             return .screen
+        case "image":
+            try requireSafeFlag(options)
+            try rejectOptions(options, allowed: ["--allow-safe-commands", "--input"])
+            let input = try requiredValue(options, name: "--input", missing: .missingInput)
+            return .image(inputURL: try validateInput(input))
         case "record":
             try requireSafeFlag(options)
             try rejectOptions(options, allowed: ["--allow-safe-commands", "--output", "--timeout"])
@@ -112,11 +121,25 @@ public enum DiagnosticCLIParser {
                 index += 1
             } else {
                 guard arguments.indices.contains(index + 1), !arguments[index + 1].hasPrefix("--") else {
-                    throw argument == "--output" ? DiagnosticCLIError.missingOutput : DiagnosticCLIError.invalidDuration
+                    if argument == "--output" { throw DiagnosticCLIError.missingOutput }
+                    if argument == "--input" { throw DiagnosticCLIError.missingInput }
+                    throw DiagnosticCLIError.invalidDuration
                 }
                 index += 2
             }
         }
+    }
+
+    private static func validateInput(_ path: String) throws -> URL {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard path.hasPrefix("/"),
+              FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              FileManager.default.isReadableFile(atPath: url.path) else {
+            throw DiagnosticCLIError.invalidInput(path)
+        }
+        return url
     }
 
     private static func validateOutput(_ path: String) throws -> URL {

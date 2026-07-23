@@ -94,6 +94,19 @@ public actor AssetTransferService {
 
     public func cancel(transferID: UInt32) async throws {
         try await session.sendAssetCommand(.abort(transferID: transferID), timeout: .seconds(2))
+        _ = try await poll { () async throws -> Bool? in
+            guard let outcome = await self.session.takeAssetTransferOutcome(transferID: transferID) else {
+                return nil
+            }
+            switch outcome {
+            case .aborted(let abortedID) where abortedID == transferID:
+                return true
+            case .rejected(_, let code, _, let message):
+                throw AssetServiceError.deviceRejected(Self.rejectionReason(code: code, message: message))
+            default:
+                throw AssetServiceError.transferInvalidated
+            }
+        }
     }
 
     private func awaitAuthorization(transferID: UInt32, expectedSHA: String, totalBytes: UInt32, kind: AssetKind) async throws -> ActiveAssetTransfer {
@@ -126,11 +139,11 @@ public actor AssetTransferService {
         guard let outcome = await session.currentAssetTransferOutcome(transferID: transferID) else { return }
         _ = await session.takeAssetTransferOutcome(transferID: transferID)
         switch outcome {
-        case .rejected(_, let code, let nextOffset, _):
+        case .rejected(_, let code, let nextOffset, let message):
             if code == "bad_offset", let nextOffset {
                 throw AssetServiceError.deviceRejected("bad_offset(next_offset=\(nextOffset))")
             }
-            throw AssetServiceError.deviceRejected(code)
+            throw AssetServiceError.deviceRejected(Self.rejectionReason(code: code, message: message))
         case .aborted:
             throw AssetServiceError.deviceRejected("aborted")
         case .invalidated:
@@ -148,8 +161,8 @@ public actor AssetTransferService {
                     return true
                 case .aborted:
                     throw AssetServiceError.deviceRejected("aborted")
-                case .rejected(_, let code, _, _):
-                    throw AssetServiceError.deviceRejected(code)
+                case .rejected(_, let code, _, let message):
+                    throw AssetServiceError.deviceRejected(Self.rejectionReason(code: code, message: message))
                 case .invalidated:
                     throw AssetServiceError.transferInvalidated
                 default:
@@ -172,6 +185,10 @@ public actor AssetTransferService {
             try await Task.sleep(for: .milliseconds(5))
         }
         throw AssetServiceError.transferTimedOut
+    }
+
+    private static func rejectionReason(code: String, message: String?) -> String {
+        message.map { "\(code)(\($0))" } ?? code
     }
 }
 

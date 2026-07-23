@@ -1,6 +1,6 @@
 # Vibe Keyboard Product Scope
 
-Status: Active design; USB core verified, replacement-firmware hardware/audio details still being recovered
+Status: Active implementation; USB core verified, remaining hardware/audio details require connected validation
 
 ## Purpose
 

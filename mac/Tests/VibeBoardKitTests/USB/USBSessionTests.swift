@@ -300,6 +300,31 @@ struct USBSessionTests {
         await session.disconnect()
     }
 
+    @Test func fastAssetProgressIsCorrelatedBeforeSuspendedChunkWriteReturns() async throws {
+        let operations = FakeSerialOperations(
+            reads: [.value(replacementDeviceInfoFrame() + capabilityFrame(features: fullAssetsFeature()))],
+            writeWaits: [.value(true)],
+            injectedReadOnWrite: (
+                call: 5,
+                data: stateFrame(#"{"event":"vk_asset_progress","next_offset":3,"transfer_id":7}"#)
+            )
+        )
+        let session = try USBSession(descriptor: descriptor, operations: operations)
+        _ = try await session.connect(handshakeTimeout: .seconds(1))
+        try await session.sendAssetCommand(.begin(transferID: 7, sha256: testHash, totalBytes: 3, kind: .image))
+        operations.enqueueRead(.value(stateFrame(assetReadyJSON(totalBytes: 3))))
+        try await waitUntil { await session.currentActiveAssetTransfer() != nil }
+        let handle = try #require(await session.currentActiveAssetTransfer())
+
+        try await session.sendAssetChunk(Data([0xaa, 0xbb, 0xcc]), using: handle)
+        try await waitUntil { await session.currentActiveAssetTransfer()?.nextOffset == 3 }
+        guard case .ready = await session.currentState() else {
+            Issue.record("Session did not remain ready")
+            return
+        }
+        await session.disconnect()
+    }
+
     @Test func correlatedAssetErrorHasTypedTerminalOutcome() async throws {
         let operations = FakeSerialOperations(reads: [.value(
             replacementDeviceInfoFrame() + capabilityFrame(features: fullAssetsFeature())
@@ -311,6 +336,34 @@ struct USBSessionTests {
         try await waitUntil { await session.currentAssetTransferOutcome(transferID: 7) != nil }
         #expect(await session.takeAssetTransferOutcome(transferID: 7) == .rejected(transferID: 7, code: "no_space", nextOffset: nil, message: nil))
         #expect(await session.currentActiveAssetTransfer() == nil)
+        await session.disconnect()
+    }
+
+    @Test func activeAssetErrorCanBeAbortedWithoutLeavingDeviceBusy() async throws {
+        let operations = FakeSerialOperations(reads: [.value(
+            replacementDeviceInfoFrame() + capabilityFrame(features: fullAssetsFeature())
+        )])
+        let session = try USBSession(descriptor: descriptor, operations: operations)
+        _ = try await session.connect(handshakeTimeout: .seconds(1))
+        try await session.sendAssetCommand(.begin(transferID: 7, sha256: testHash, totalBytes: 3, kind: .image))
+        operations.enqueueRead(.value(stateFrame(assetReadyJSON(totalBytes: 3))))
+        try await waitUntil { await session.currentActiveAssetTransfer() != nil }
+        let handle = try #require(await session.currentActiveAssetTransfer())
+        try await session.sendAssetChunk(Data([0xaa, 0xbb, 0xcc]), using: handle)
+        operations.enqueueRead(.value(stateFrame(#"{"event":"vk_asset_progress","next_offset":3,"transfer_id":7}"#)))
+        try await waitUntil { await session.currentActiveAssetTransfer()?.nextOffset == 3 }
+
+        try await session.sendAssetCommand(.end(transferID: 7, sha256: testHash, totalBytes: 3, kind: .image))
+        operations.enqueueRead(.value(stateFrame(
+            #"{"code":"write_failed","event":"vk_error","message":"phase=end;esp_err=0xffffffff","operation":"asset","transfer_id":7}"#
+        )))
+        try await waitUntil { await session.currentAssetTransferOutcome(transferID: 7) != nil }
+        #expect(await session.currentActiveAssetTransfer()?.transferID == 7)
+
+        try await session.sendAssetCommand(.abort(transferID: 7))
+        operations.enqueueRead(.value(stateFrame(#"{"event":"vk_asset_aborted","transfer_id":7}"#)))
+        try await waitUntil { await session.currentActiveAssetTransfer() == nil }
+        #expect(decodedStateBodies(operations.writtenData).contains(#"{"event":"vk_asset_abort","transfer_id":7}"#))
         await session.disconnect()
     }
 

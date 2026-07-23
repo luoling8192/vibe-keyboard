@@ -263,7 +263,7 @@ open serial
   → retry get_device_info every 1.5 seconds until device_info arrives
 ```
 
-A clean-boot live test completed this sequence using body-length frames. The current `voice_stick` 0.3.8 firmware enabled USB mirror, returned a valid framed `device_info`, stayed active through seven two-second heartbeats, and restored log mode about five seconds after the host closed the descriptor. The captured event reported hardware `vibe_keyboard`, firmware `0.3.8`, firmware device ID `VS-020000000001`, four buttons, two interaction modes, and five UI states. The USB-registry normalized ID remains separately `020000000001`. See [USB Runtime Evidence](../plan/analysis/usb-runtime.md).
+A clean-boot live test completed this sequence using body-length frames. The current `voice_stick` 0.3.8 firmware enabled USB mirror, returned a valid framed `device_info`, stayed active through seven two-second heartbeats, and restored log mode about five seconds after the host closed the descriptor. The captured event reported hardware `vibe_keyboard`, firmware `0.3.8`, firmware device ID `VS-020000000001`, four buttons, two interaction modes, and five UI states. The USB-registry normalized ID remains separately `020000000001`.
 
 ## Replacement USB Epoch and Capabilities
 
@@ -340,62 +340,19 @@ Provisioning also uses type `0x10` JSON with event `provision` and a `device_sec
 
 The new encoder rejects bodies that cannot be represented by UInt16 or would exceed the 4096-byte total frame limit instead of reproducing the vendor builder's truncation behavior.
 
-## Vendor OTA Frames
+## Application Installation (Not the Update Protocol)
 
-VibeBoard.app constructs OTA frames directly rather than through the ordinary JSON builder. Its offset-2 field is inconsistent across types and must be modeled per type, never through one generic OTA encoder:
+The supported first installation uses the ESP32-S3 ROM download path through
+`firmware/tools/auto_flash.py`. The helper validates the application image,
+writes only `ota_0 @ 0x20000`, verifies the written bytes, and leaves the
+bootloader, partition table, NVS, OTA metadata, and asset storage unchanged.
 
-| Type | Structure | Offset-2 meaning |
-|---:|---|---|
-| `0x20` begin | header + image size UInt32LE + transfer ID UInt32LE | total length `12` |
-| `0x21` data | header + transfer ID UInt32LE + offset UInt32LE + chunk | body length `8 + chunk.count` |
-| `0x22` finish | header + transfer ID UInt32LE + total bytes UInt32LE | total length `12` |
-| `0x23` cancel | header + transfer ID UInt32LE | total length `8` |
-
-The vendor host sends 512-byte data chunks and waits for progress after at most 32 KiB. Type `0x30` is ordinary body-length JSON with verified events `ready`, `progress`, `done`, `error`, and `aborted`; fields include `transfer_id`, `written`, `size`, `code`, `esp_err`, and `reboot_ms` where applicable.
-
-Vendor finish is not a safe first-write API: firmware validates the image, calls `esp_ota_set_boot_partition()`, and schedules reboot. It has no staged “seal but do not select” operation, and automatic rollback is not proven.
-
-## First-Write Bootstrap (Not the Update Protocol)
-
-The first replacement application cannot stage itself. The device still runs the vendor application and bootloader; vendor finish immediately selects and reboots, and vendor automatic rollback is unproven. First write is therefore a separate host-controlled ROM-download bootstrap, not `vk_update` and not vendor OTA.
-
-Before any write, the host procedure must fail closed unless all of these pass:
-
-1. enter the already verified ESP32-S3 ROM download path and re-identify the exact chip/port;
-2. read-only inspect Secure Boot, flash-encryption, anti-rollback, and relevant eFuse state with named tooling; any enabled/unknown policy not covered by the image/recovery plan blocks the write;
-3. revalidate the private full-backup manifest, active `ota_0`, both `otadata` sectors, partition table, and recovery commands;
-4. validate the candidate as ESP32-S3, revision-compatible, size `1...0x500000`, checksum-valid, appended-hash-valid, and built against the reviewed partition contract;
-5. prove `ota_0 @ 0x020000` remains the vendor recovery image and `ota_1 @ 0x520000` is the only application target.
-
-Bootstrap has two separately authorized mutations:
-
-```text
-stage application
-  → ROM/esptool writes exactly candidate image bytes at 0x520000
-  → no bootloader/partition/NVS/NVS-keys/PHY/storage/ota_0/otadata write
-  → ROM/esptool reads back exactly candidate length
-  → byte equality + SHA-256 + image_info validation
-
-activate application
-  → re-read both otadata sectors and ota_0 hash
-  → require primary vendor otadata sector still equals the verified valid record
-  → require secondary otadata sector is still erased
-  → generate one ESP-IDF 5.5.2-compatible golden OTA-select record for ota_1 offline
-  → independently decode/check sequence, CRC, state, and selected slot
-  → write only the erased secondary 0x1000-byte otadata sector
-  → read back and byte-compare that sector
-  → reset only after explicit human authorization
-```
-
-The exact golden otadata bytes, sequence/state/CRC derivation, ROM command lines, port, and readback hashes are first-write artifacts reviewed by `firmware-bootstrap-001`; they are not inferred at execution time and must not contain private NVS material. Activation never overwrites the verified primary vendor otadata record.
-
-This bootstrap does **not** install a replacement bootloader and must not claim `PENDING_VERIFY` or automatic rollback. Failure recovery depends on the independently proven ROM-download path and private backup: restore the verified vendor `ota_0` and original `otadata` sectors, or the full image when required. A later replacement-bootloader migration is a distinct high-risk gate; until it is implemented and verified, subsequent application activation uses the same explicit recovery assumption.
-
-No current document authorizes executing this procedure. Implementation and evidence requirements live in [firmware-bootstrap-001](../plan/tasks/firmware-bootstrap-001.md).
+This path is separate from `vk_update`. Broader bootloader or partition changes
+are outside the supported workflow.
 
 ## Replacement Staged Update Wire Contract
 
-`vk_update` does not bootstrap the first image. While the first replacement app runs from ota_1 with vendor ota_0 retained as recovery, `features.update` must be absent or `available:false` with `reason:"bootloader_migration_required"`; it must not choose vendor ota_0 as an update target. The available service below is enabled only after `firmware-bootloader-001` installs and verifies a rollback-enabled replacement bootloader and defines both slots as managed replacement slots. It uses type-`0x10` typed JSON controls and negotiated binary type `0x41`; vendor `0x20...0x23` remain evidence-only.
+`vk_update` does not bootstrap the first image. The current production build reports `available:false` with `reason:"bootloader_migration_required"`. The available service below is enabled only after a rollback-enabled replacement bootloader is installed and both slots are managed replacement slots. It uses type-`0x10` typed JSON controls and negotiated binary type `0x41`.
 
 The USB core contains the complete typed update command/chunk decoder but dispatches it only when two independent gates pass: the immutable production boot policy says the reviewed bootloader migration/first-boot gate is complete, and a registered typed update provider successfully recomputes a currently available running/target tuple. The current pre-migration production composition fixes the immutable policy to disabled, rejects registration/dispatch as typed `unsupported`, and never advertises update. No host command can change this policy.
 
@@ -486,9 +443,9 @@ Byte-by-byte stream resynchronization is an authorized recovery rule, not silent
 - Valid numeric vendor voice-gain range remains unknown and is not exposed.
 - Replacement capability, asset, widget, screen, and staged-update contracts require implementation and connected validation; their wire values are not claims about vendor firmware.
 
-## Evidence Gate
+## Validation Gate
 
-Core framing is stable from independent arm64 and x86_64 disassembly of `UsbCentral.parseFrames`, `dispatchFrame`, `sendFrame`, `BleProtocol.parseAudioFrame`, and `BleProtocol.parseStateEvent` in VibeBoard.app 0.5.4.
+Core framing is covered by shared fixtures, strict decoders, and connected-device validation.
 
 The following remain required before user-visible feature completion:
 

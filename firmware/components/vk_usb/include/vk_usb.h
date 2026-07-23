@@ -379,9 +379,11 @@ typedef esp_err_t (*vk_usb_asset_transfer_state_t)(void *, uint32_t transfer_id,
                                                    uint32_t *next_offset);
 typedef esp_err_t (*vk_usb_asset_event_handler_t)(void *, const vk_usb_asset_command_t *,
                                                   vk_usb_asset_event_t *event);
+typedef size_t (*vk_usb_asset_error_detail_t)(void *, char *output, size_t capacity);
 typedef struct vk_usb_screen_event vk_usb_screen_event_t;
 typedef esp_err_t (*vk_usb_screen_handler_t)(void *, const vk_usb_screen_command_t *,
                                              vk_usb_screen_event_t *);
+typedef size_t (*vk_usb_screen_error_detail_t)(void *, char *output, size_t capacity);
 typedef esp_err_t (*vk_usb_update_handler_t)(void *, const vk_usb_update_command_t *);
 typedef esp_err_t (*vk_usb_update_chunk_handler_t)(void *, const vk_usb_update_chunk_t *);
 
@@ -393,10 +395,12 @@ typedef struct {
     uint32_t max_asset_bytes;
     vk_usb_asset_transfer_state_t get_transfer_state;
     vk_usb_asset_event_handler_t build_event;
+    vk_usb_asset_error_detail_t error_detail;
 } vk_usb_asset_handler_registration_t;
 
 typedef struct {
     vk_usb_screen_handler_t handle_command;
+    vk_usb_screen_error_detail_t error_detail;
     void *context;
 } vk_usb_screen_handler_registration_t;
 

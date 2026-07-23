@@ -15,6 +15,9 @@ struct ConnectedDiagnosticTests {
         #expect(throws: DiagnosticCLIError.safeFlagRequired) {
             _ = try DiagnosticCLIParser.parse(["screen"])
         }
+        #expect(throws: DiagnosticCLIError.safeFlagRequired) {
+            _ = try DiagnosticCLIParser.parse(["image", "--input", "/tmp/test.jpg"])
+        }
         #expect(try DiagnosticCLIParser.parse(["screen", "--allow-safe-commands"]) == .screen)
         #expect(throws: DiagnosticCLIError.unsupportedOption("--raw-json")) {
             _ = try DiagnosticCLIParser.parse(["handshake", "--allow-safe-commands", "--raw-json", "{}"])
@@ -35,9 +38,20 @@ struct ConnectedDiagnosticTests {
         #expect(throws: DiagnosticCLIError.invalidOutput("relative.ogg")) {
             _ = try DiagnosticCLIParser.parse(["record", "--allow-safe-commands", "--output", "relative.ogg"])
         }
+        #expect(throws: DiagnosticCLIError.missingInput) {
+            _ = try DiagnosticCLIParser.parse(["image", "--allow-safe-commands"])
+        }
+        #expect(throws: DiagnosticCLIError.invalidInput("relative.jpg")) {
+            _ = try DiagnosticCLIParser.parse(["image", "--allow-safe-commands", "--input", "relative.jpg"])
+        }
 
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
+        let input = directory.appendingPathComponent("image.jpg")
+        try Data([0xff, 0xd8, 0xff, 0xd9]).write(to: input)
+        #expect(try DiagnosticCLIParser.parse([
+            "image", "--allow-safe-commands", "--input", input.path,
+        ]) == .image(inputURL: input.standardizedFileURL))
         let output = directory.appendingPathComponent("speech.ogg")
         #expect(try DiagnosticCLIParser.parse([
             "record", "--allow-safe-commands", "--output", output.path, "--timeout", "12",

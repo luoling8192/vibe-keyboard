@@ -15,6 +15,11 @@ public struct DecodedAssetFrame: Equatable, Sendable {
 public struct DecodedAssetSource: Equatable, Sendable {
     public let frames: [DecodedAssetFrame]
     public let animated: Bool
+
+    public init(frames: [DecodedAssetFrame], animated: Bool) {
+        self.frames = frames
+        self.animated = animated
+    }
 }
 
 public enum AssetSourceDecoder {

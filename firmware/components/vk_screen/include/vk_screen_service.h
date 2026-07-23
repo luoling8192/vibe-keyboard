@@ -24,8 +24,9 @@ extern "C" {
 #define VK_SCREEN_SERVICE_MAX_FRAMES 64U
 #define VK_SCREEN_SERVICE_MIN_FRAME_MS 10U
 #define VK_SCREEN_SERVICE_MAX_FRAME_MS 60000U
-#define VK_SCREEN_SERVICE_DECODE_BUDGET_BYTES 243104U
 #define VK_SCREEN_SERVICE_DECODER_SCRATCH_BYTES 4096U
+/* Two full RGB565 roots coexist during replacement, plus decoder scratch. */
+#define VK_SCREEN_SERVICE_DECODE_BUDGET_BYTES 247200U
 
 /* The product build admits the connected 428x142 Vibe Board display profile. */
 #define VK_SCREEN_SERVICE_PHYSICAL_ACCEPTANCE_ADMITTED 1

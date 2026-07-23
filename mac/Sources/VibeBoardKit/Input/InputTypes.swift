@@ -34,6 +34,7 @@ public struct KeyboardShortcut: Codable, Equatable, Sendable {
     public enum Modifier: String, Codable, CaseIterable, Comparable, Sendable {
         case command
         case control
+        case function
         case option
         case shift
 

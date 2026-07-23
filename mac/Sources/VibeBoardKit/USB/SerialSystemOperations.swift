@@ -48,7 +48,7 @@ struct DarwinSerialSyscalls: DarwinSerialSyscallOperating {
 
     func setAttributes(fileDescriptor: Int32, attributes: termios) -> SerialIOResult<Void> {
         var mutableAttributes = attributes
-        return tcsetattr(fileDescriptor, TCSANOW, &mutableAttributes) == 0 ? .value(()) : .failure(errno)
+        return tcsetattr(fileDescriptor, TCSAFLUSH, &mutableAttributes) == 0 ? .value(()) : .failure(errno)
     }
 
     func close(fileDescriptor: Int32) -> SerialIOResult<Void> {

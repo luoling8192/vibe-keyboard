@@ -81,7 +81,7 @@ The parser uses fixed/bounded storage, direction-specific type allowlists, check
 
 ## Display
 
-The exact vendor NV3007 profile is an evidence gate. Once recovered, `vk_board` owns panel creation and `vk_screen` owns LVGL objects. Host commands cannot send raw panel commands or create arbitrary LVGL object types.
+The exact NV3007 profile is a validation gate. `vk_board` owns panel creation and `vk_screen` owns LVGL objects. Host commands cannot send raw panel commands or create arbitrary LVGL object types.
 
 One RGB565 full-screen buffer is 121,552 bytes. Buffer count and chunk lines must be selected from measured PSRAM/internal-DMA constraints, not from the ESP8266 reference.
 

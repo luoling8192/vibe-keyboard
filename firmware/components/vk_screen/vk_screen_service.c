@@ -286,6 +286,16 @@ esp_err_t vk_screen_service_handle_widget(void *context,
     return ESP_OK;
 }
 
+static size_t screen_error_detail(void *context, char *output, size_t capacity)
+{
+    vk_screen_service_t *service = context;
+    if (service == NULL || service->screen == NULL || output == NULL ||
+        capacity == 0U) return 0U;
+    int written = snprintf(output, capacity, "stage=%s",
+                           vk_screen_last_error_stage(service->screen));
+    return written > 0 && (size_t)written < capacity ? (size_t)written : 0U;
+}
+
 void vk_screen_service_registrations(vk_screen_service_t *service,
                                      vk_usb_capability_provider_registration_t *capabilities,
                                      vk_usb_asset_handler_registration_t *assets,
@@ -298,7 +308,9 @@ void vk_screen_service_registrations(vk_screen_service_t *service,
         capabilities->context = service;
     }
     if (screen != NULL) *screen = (vk_usb_screen_handler_registration_t){
-        .handle_command = vk_screen_service_handle_screen, .context = service};
+        .handle_command = vk_screen_service_handle_screen,
+        .error_detail = screen_error_detail,
+        .context = service};
     if (widget != NULL) *widget = (vk_usb_widget_handler_registration_t){
         .handle_command = vk_screen_service_handle_widget, .context = service};
 }

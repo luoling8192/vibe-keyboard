@@ -193,6 +193,7 @@ public enum ReplacementEventDecoder {
         switch operation {
         case "asset", "storage": allowed = baseKeys.union(assetOptionalKeys)
         case "screen": allowed = baseKeys.union(["message"])
+        case "input": allowed = baseKeys
         default: throw ReplacementProtocolError.invalidValue(field: "operation")
         }
         guard baseKeys.isSubset(of: Set(object.keys)), Set(object.keys).isSubset(of: allowed) else {
@@ -200,7 +201,12 @@ public enum ReplacementEventDecoder {
         }
         let assetCodes: Set<String> = ["invalid_request", "unavailable", "wrong_epoch", "busy", "conflict", "not_found", "bad_offset", "bad_size", "bad_hash", "kind_mismatch", "write_failed", "incomplete", "invalid_asset", "timeout", "no_space", "referenced", "revision_conflict", "snapshot_expired", "partition_mismatch", "not_erased", "format_failed", "internal"]
         let screenCodes: Set<String> = ["invalid_request", "unavailable", "wrong_epoch", "revision_conflict", "conflict", "invalid_manifest", "missing_asset", "font_mismatch", "limit_exceeded", "allocation_failed", "render_failed", "internal"]
-        guard ((operation == "asset" || operation == "storage") && assetCodes.contains(code)) || (operation == "screen" && screenCodes.contains(code)) else { throw ReplacementProtocolError.invalidValue(field: "error") }
+        let inputCodes: Set<String> = ["invalid_request", "wrong_epoch", "busy", "input_queue_overflow", "audio_start_failed", "audio_stop_failed", "audio_runtime_failed", "tainted"]
+        guard ((operation == "asset" || operation == "storage") && assetCodes.contains(code)) ||
+              (operation == "screen" && screenCodes.contains(code)) ||
+              (operation == "input" && inputCodes.contains(code)) else {
+            throw ReplacementProtocolError.invalidValue(field: "error")
+        }
         let transfer = try object["transfer_id"].map { _ in try requiredNonzeroUInt32(object, "transfer_id") }
         let next = try object["next_offset"].map { _ in try requiredUInt32(object, "next_offset") }
         let hash = try object["sha256"].map { _ in try requiredSHA(object, "sha256") }

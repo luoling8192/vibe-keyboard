@@ -343,6 +343,89 @@ static esp_err_t send_asset_error(vk_usb_service_t *s, const char *code, uint32_
     return result == ESP_OK ? send_json_bytes(s, s->protocol_json, length) : result;
 }
 
+static esp_err_t send_asset_backend_error(vk_usb_service_t *service,
+                                          const vk_usb_asset_handler_registration_t *handler,
+                                          const char *phase,
+                                          esp_err_t backend_result, uint32_t transfer_id,
+                                          bool has_next_offset, uint32_t next_offset)
+{
+    char detail[96] = {0};
+    if (handler != NULL && handler->error_detail != NULL) {
+        (void)handler->error_detail(handler->context, detail, sizeof(detail));
+    }
+    char message[160];
+    int written = detail[0] == '\0'
+        ? snprintf(message, sizeof(message), "phase=%s;esp_err=0x%08" PRIx32,
+                   phase, (uint32_t)backend_result)
+        : snprintf(message, sizeof(message), "phase=%s;%s", phase, detail);
+    if (written <= 0 || (size_t)written >= sizeof(message)) {
+        return send_asset_error(service, "write_failed", transfer_id,
+                                has_next_offset, next_offset);
+    }
+    vk_usb_protocol_error_t error = {
+        .operation = VK_USB_ERROR_ASSET,
+        .code = backend_result == ESP_ERR_NOT_SUPPORTED ? "unavailable" : "write_failed",
+        .message = message,
+        .has_transfer_id = transfer_id != 0U,
+        .transfer_id = transfer_id,
+        .has_next_offset = has_next_offset,
+        .next_offset = next_offset,
+    };
+    size_t length = 0U;
+    esp_err_t result = vk_usb_protocol_error_encode(
+        &error, service->protocol_json, sizeof(service->protocol_json), &length);
+    return result == ESP_OK
+        ? send_json_bytes(service, service->protocol_json, length)
+        : result;
+}
+
+static esp_err_t send_screen_error(
+    vk_usb_service_t *service,
+    const vk_usb_screen_handler_registration_t *handler,
+    const char *code, const char *phase, esp_err_t cause)
+{
+    char detail[48] = {0};
+    if (handler != NULL && handler->error_detail != NULL) {
+        (void)handler->error_detail(
+            handler->context, detail, sizeof(detail));
+    }
+    char message[96];
+    int written = detail[0] == '\0'
+        ? snprintf(message, sizeof(message),
+                   "phase=%s;esp_err=0x%08" PRIx32,
+                   phase, (uint32_t)cause)
+        : snprintf(message, sizeof(message),
+                   "phase=%s;%s;esp_err=0x%08" PRIx32,
+                   phase, detail, (uint32_t)cause);
+    if (written <= 0 || (size_t)written >= sizeof(message)) {
+        return send_error(service, "screen", code);
+    }
+    vk_usb_protocol_error_t error = {
+        .operation = VK_USB_ERROR_SCREEN,
+        .code = code,
+        .message = message,
+    };
+    size_t length = 0U;
+    esp_err_t result = vk_usb_protocol_error_encode(
+        &error, service->protocol_json, sizeof(service->protocol_json), &length);
+    return result == ESP_OK
+        ? send_json_bytes(service, service->protocol_json, length)
+        : result;
+}
+
+static const char *asset_command_phase(vk_usb_asset_command_kind_t kind)
+{
+    switch (kind) {
+    case VK_USB_ASSET_BEGIN: return "begin";
+    case VK_USB_ASSET_QUERY: return "query";
+    case VK_USB_ASSET_END: return "end";
+    case VK_USB_ASSET_ABORT: return "abort";
+    case VK_USB_ASSET_LIST: return "list";
+    case VK_USB_ASSET_DELETE: return "delete";
+    default: return "command";
+    }
+}
+
 static esp_err_t dispatch_asset(vk_usb_service_t*s,const json_object_t*o,const char*event)
 {
     (void)event;
@@ -422,7 +505,7 @@ static esp_err_t dispatch_asset(vk_usb_service_t*s,const json_object_t*o,const c
     state_lock(s);s->asset_transfer.callback_in_flight=false;if(s->protocol_callbacks_in_flight!=0U)--s->protocol_callbacks_in_flight;
     bool current=s->installed&&!s->stop_requested&&s->epoch_active&&s->epoch==epoch&&s->capability_valid&&s->capability_generation==generation&&s->protocol_callback_admission_open;
     if(!current){state_unlock(s);return ESP_ERR_INVALID_STATE;}
-    if(result!=ESP_OK){state_unlock(s);return send_asset_error(s,result==ESP_ERR_NOT_SUPPORTED?"unavailable":"write_failed",command.transfer_id,false,0U);}
+    if(result!=ESP_OK){state_unlock(s);return send_asset_backend_error(s,&handler,asset_command_phase(command.kind),result,command.transfer_id,false,0U);}
     vk_usb_asset_event_t response={0};
     if(command.kind==VK_USB_ASSET_BEGIN){
         s->asset_transfer.authorized=true;s->asset_transfer.epoch=epoch;s->asset_transfer.generation=generation;
@@ -459,7 +542,7 @@ static esp_err_t dispatch_screen(vk_usb_service_t*s,const json_object_t*o,const 
                s->capability_epoch==epoch&&screen.state==VK_USB_CAPABILITY_AVAILABLE&&handler.handle_command!=NULL;
     state_unlock(s);if(!authorized)return send_error(s,"screen","unavailable");
     vk_usb_screen_command_t command;esp_err_t decoded=vk_usb_screen_command_decode(o->document,o->node,&screen,428U,142U,epoch,generation,&command);
-    if(decoded!=ESP_OK)return send_error(s,"screen",decoded==ESP_ERR_NOT_SUPPORTED?"unsupported":"invalid_request");
+    if(decoded!=ESP_OK)return send_screen_error(s,&handler,decoded==ESP_ERR_NOT_SUPPORTED?"unavailable":"invalid_request","decode",decoded);
     state_lock(s);if(!s->installed||s->stop_requested||!s->epoch_active||s->epoch!=epoch||!s->capability_valid||
        s->capability_generation!=generation||!s->protocol_callback_admission_open){state_unlock(s);return send_error(s,"screen","wrong_epoch");}
     ++s->protocol_callbacks_in_flight;state_unlock(s);
@@ -467,7 +550,7 @@ static esp_err_t dispatch_screen(vk_usb_service_t*s,const json_object_t*o,const 
     state_lock(s);if(s->protocol_callbacks_in_flight!=0U)--s->protocol_callbacks_in_flight;
     bool current=s->installed&&!s->stop_requested&&s->epoch_active&&s->epoch==epoch&&s->capability_valid&&s->capability_generation==generation;
     state_unlock(s);if(!current)return ESP_ERR_INVALID_STATE;
-    return result==ESP_OK?vk_usb_service_send_screen_event_for_epoch(s,epoch,generation,&response):send_error(s,"screen",result==ESP_ERR_NOT_SUPPORTED?"unavailable":"invalid_request");
+    return result==ESP_OK?vk_usb_service_send_screen_event_for_epoch(s,epoch,generation,&response):send_screen_error(s,&handler,result==ESP_ERR_NOT_SUPPORTED?"unavailable":"invalid_request","commit",result);
 }
 
 static esp_err_t dispatch_widget(vk_usb_service_t*s,const json_object_t*o)
@@ -632,7 +715,7 @@ static esp_err_t dispatch_chunk(vk_usb_service_t*s,uint8_t type,const uint8_t*b,
         s->capability_generation==generation&&s->asset_transfer.authorized&&s->asset_transfer.transfer_id==transfer_id&&
         s->asset_transfer.next_offset==offset&&s->protocol_callback_admission_open;
     if(!current){state_unlock(s);return ESP_ERR_INVALID_STATE;}
-    if(result!=ESP_OK){next=s->asset_transfer.next_offset;state_unlock(s);return send_asset_error(s,"write_failed",transfer_id,true,next);}
+    if(result!=ESP_OK){next=s->asset_transfer.next_offset;state_unlock(s);return send_asset_backend_error(s,&handler,"chunk",result,transfer_id,true,next);}
     s->asset_transfer.next_offset=offset+(uint32_t)payload;next=s->asset_transfer.next_offset;state_unlock(s);
     vk_usb_asset_event_t progress={.kind=VK_USB_ASSET_EVENT_PROGRESS,.transfer_id=transfer_id,.next_offset=next};
     return send_asset_event_now(s,&progress);

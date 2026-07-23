@@ -181,12 +181,14 @@ typedef struct {
     size_t selected_assets_manifest_bytes;
     uint8_t selected_screen_manifest[VK_USB_MAX_JSON_BYTES];
     size_t selected_screen_manifest_bytes;
+    char last_error_stage[24];
 } vk_screen_t;
 
 esp_err_t vk_screen_init(vk_screen_t *screen, const vk_screen_config_t *config);
 esp_err_t vk_screen_stop(vk_screen_t *screen);
 esp_err_t vk_screen_commit(vk_screen_t *screen, const vk_usb_screen_command_t *command,
                            vk_usb_screen_event_t *event);
+const char *vk_screen_last_error_stage(const vk_screen_t *screen);
 /* Rebuilds a render root from an already validated immutable store revision.
  * The caller owns the bounded JSON workspace and envelope buffer. No durable write occurs. */
 esp_err_t vk_screen_restore(vk_screen_t *screen, uint32_t revision, uint32_t previous_revision,

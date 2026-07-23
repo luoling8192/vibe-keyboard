@@ -39,7 +39,7 @@ Rules:
 - `K1...K4` are distinct integers whose set is exactly `{0,1,2,3}`; their values remain intentionally unspecified until physical calibration.
 - `N` is a measured integer in `1...255`; it remains unspecified before calibration.
 - `M` is a measured integer in `1...13005` (`17 × 3 × 255`); it remains unspecified before calibration.
-- `tick_ms:30` and the internal maximum channel change of 32 per tick are replacement animation policy selected from recovered vendor behavior, not hardware requirements or claims of vendor visual parity.
+- `tick_ms:30` and the internal maximum channel change of 32 per tick are replacement animation policy selected from observed device behavior, not hardware requirements or claims of visual parity.
 - Known LED blocks reject missing, extra, Boolean-for-integer, and out-of-range values.
 
 No build may advertise `available:true` merely because the RMT driver initialized or a mapping observation exists. Production admission additionally requires a healthy LED owner and the exact reviewed profile described below.

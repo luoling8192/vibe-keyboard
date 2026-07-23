@@ -529,26 +529,158 @@ esp_err_t vk_screen_stop(vk_screen_t *screen)
     return ESP_OK;
 }
 
-esp_err_t vk_screen_commit(vk_screen_t *screen,const vk_usb_screen_command_t *command,vk_usb_screen_event_t *event)
+static void set_error_stage(vk_screen_t *screen, const char *stage)
+{
+    snprintf(screen->last_error_stage, sizeof(screen->last_error_stage), "%s", stage);
+}
+
+const char *vk_screen_last_error_stage(const vk_screen_t *screen)
+{
+    return screen == NULL || screen->last_error_stage[0] == '\0'
+        ? "unknown"
+        : screen->last_error_stage;
+}
+
+esp_err_t vk_screen_commit(vk_screen_t *screen, const vk_usb_screen_command_t *command,
+                           vk_usb_screen_event_t *event)
 {
     if (screen == NULL || command == NULL || event == NULL ||
         command->kind != VK_USB_SCREEN_COMMIT || command->expected_epoch == 0U ||
         command->snapshot_generation == 0U ||
-        atomic_load_explicit(&screen->stopping, memory_order_acquire)) return ESP_ERR_INVALID_ARG;
+        atomic_load_explicit(&screen->stopping, memory_order_acquire)) {
+        return ESP_ERR_INVALID_ARG;
+    }
     if (!lock_screen(screen)) return ESP_ERR_INVALID_STATE;
-    if(screen->current.configured&&command->revision==screen->current.revision){
-        size_t as,ae,ss,se;bool ranges=vk_usb_json_node_range(command->document,command->assets_node,&as,&ae)&&vk_usb_json_node_range(command->document,command->screen_node,&ss,&se);
-        bool same=command->expected_revision==screen->current.previous_revision&&ranges&&ae-as==screen->selected_assets_manifest_bytes&&se-ss==screen->selected_screen_manifest_bytes&&memcmp(command->document->bytes+as,screen->selected_assets_manifest,ae-as)==0&&memcmp(command->document->bytes+ss,screen->selected_screen_manifest,se-ss)==0;
-        if(!same){unlock_screen(screen);return ESP_ERR_INVALID_STATE;}*event=(vk_usb_screen_event_t){.kind=VK_USB_SCREEN_EVENT_COMMITTED,.previous_revision=screen->current.previous_revision,.revision=screen->current.revision};snprintf(event->assets_manifest_sha256,sizeof(event->assets_manifest_sha256),"%s",screen->current.assets_manifest_sha256);snprintf(event->screen_manifest_sha256,sizeof(event->screen_manifest_sha256),"%s",screen->current.screen_manifest_sha256);unlock_screen(screen);return ESP_OK;}
-    if(command->expected_revision!=screen->current.revision||!vk_screen_revision_is_newer(command->revision,screen->current.revision)){unlock_screen(screen);return ESP_ERR_INVALID_STATE;}
-    vk_screen_model_t *candidate=calloc(1U,sizeof(*candidate));
-    if(candidate==NULL){unlock_screen(screen);return ESP_ERR_NO_MEM;}
-    esp_err_t result=build_model(screen,command,candidate);void*new_root=NULL;
-    if(result==ESP_OK)result=screen->config.renderer.lock(screen->config.renderer.context);
-    if(result==ESP_OK){result=screen->config.renderer.create_candidate(screen->config.renderer.context,candidate,&new_root);if(result==ESP_OK&&screen->config.durable_publish!=NULL)result=screen->config.durable_publish(screen->config.durable_context,command,candidate);if(result==ESP_OK){void*old=NULL;result=screen->config.renderer.swap_root(screen->config.renderer.context,new_root,&old);if(result==ESP_OK){size_t as,ae,ss,se;if(!vk_usb_json_node_range(command->document,command->assets_node,&as,&ae)||!vk_usb_json_node_range(command->document,command->screen_node,&ss,&se)||ae-as>sizeof(screen->selected_assets_manifest)||se-ss>sizeof(screen->selected_screen_manifest)){result=ESP_ERR_INVALID_SIZE;}else{memcpy(screen->selected_assets_manifest,command->document->bytes+as,ae-as);screen->selected_assets_manifest_bytes=ae-as;memcpy(screen->selected_screen_manifest,command->document->bytes+ss,se-ss);screen->selected_screen_manifest_bytes=se-ss;screen->current=*candidate;screen->current_root=new_root;screen->bound_epoch=command->expected_epoch;screen->bound_snapshot_generation=command->snapshot_generation;new_root=old;}}}screen->config.renderer.unlock(screen->config.renderer.context);}
-    if(new_root!=NULL)screen->config.renderer.destroy_root(screen->config.renderer.context,new_root);
-    if(result==ESP_OK){*event=(vk_usb_screen_event_t){.kind=VK_USB_SCREEN_EVENT_COMMITTED,.previous_revision=candidate->previous_revision,.revision=candidate->revision};snprintf(event->assets_manifest_sha256,sizeof(event->assets_manifest_sha256),"%s",candidate->assets_manifest_sha256);snprintf(event->screen_manifest_sha256,sizeof(event->screen_manifest_sha256),"%s",candidate->screen_manifest_sha256);}
-    free(candidate);unlock_screen(screen);return result;
+    screen->last_error_stage[0] = '\0';
+
+    if (screen->current.configured && command->revision == screen->current.revision) {
+        size_t assets_start, assets_end, screen_start, screen_end;
+        bool ranges =
+            vk_usb_json_node_range(command->document, command->assets_node,
+                                   &assets_start, &assets_end) &&
+            vk_usb_json_node_range(command->document, command->screen_node,
+                                   &screen_start, &screen_end);
+        bool same =
+            command->expected_revision == screen->current.previous_revision &&
+            ranges &&
+            assets_end - assets_start == screen->selected_assets_manifest_bytes &&
+            screen_end - screen_start == screen->selected_screen_manifest_bytes &&
+            memcmp(command->document->bytes + assets_start,
+                   screen->selected_assets_manifest,
+                   assets_end - assets_start) == 0 &&
+            memcmp(command->document->bytes + screen_start,
+                   screen->selected_screen_manifest,
+                   screen_end - screen_start) == 0;
+        if (!same) {
+            set_error_stage(screen, "replay");
+            unlock_screen(screen);
+            return ESP_ERR_INVALID_STATE;
+        }
+        *event = (vk_usb_screen_event_t){
+            .kind = VK_USB_SCREEN_EVENT_COMMITTED,
+            .previous_revision = screen->current.previous_revision,
+            .revision = screen->current.revision,
+        };
+        snprintf(event->assets_manifest_sha256,
+                 sizeof(event->assets_manifest_sha256), "%s",
+                 screen->current.assets_manifest_sha256);
+        snprintf(event->screen_manifest_sha256,
+                 sizeof(event->screen_manifest_sha256), "%s",
+                 screen->current.screen_manifest_sha256);
+        unlock_screen(screen);
+        return ESP_OK;
+    }
+    if (command->expected_revision != screen->current.revision ||
+        !vk_screen_revision_is_newer(command->revision, screen->current.revision)) {
+        set_error_stage(screen, "revision");
+        unlock_screen(screen);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    vk_screen_model_t *candidate = calloc(1U, sizeof(*candidate));
+    if (candidate == NULL) {
+        set_error_stage(screen, "model_alloc");
+        unlock_screen(screen);
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t result = build_model(screen, command, candidate);
+    if (result != ESP_OK) set_error_stage(screen, "model_build");
+
+    size_t assets_start = 0U, assets_end = 0U;
+    size_t screen_start = 0U, screen_end = 0U;
+    if (result == ESP_OK &&
+        (!vk_usb_json_node_range(command->document, command->assets_node,
+                                 &assets_start, &assets_end) ||
+         !vk_usb_json_node_range(command->document, command->screen_node,
+                                 &screen_start, &screen_end) ||
+         assets_end - assets_start > sizeof(screen->selected_assets_manifest) ||
+         screen_end - screen_start > sizeof(screen->selected_screen_manifest))) {
+        set_error_stage(screen, "manifest_range");
+        result = ESP_ERR_INVALID_SIZE;
+    }
+
+    void *new_root = NULL;
+    bool renderer_locked = false;
+    if (result == ESP_OK) {
+        result = screen->config.renderer.lock(screen->config.renderer.context);
+        renderer_locked = result == ESP_OK;
+        if (result != ESP_OK) set_error_stage(screen, "renderer_lock");
+    }
+    if (result == ESP_OK) {
+        result = screen->config.renderer.create_candidate(
+            screen->config.renderer.context, candidate, &new_root);
+        if (result != ESP_OK) set_error_stage(screen, "renderer_create");
+    }
+    if (result == ESP_OK && screen->config.durable_publish != NULL) {
+        result = screen->config.durable_publish(
+            screen->config.durable_context, command, candidate);
+        if (result != ESP_OK) set_error_stage(screen, "durable_publish");
+    }
+    if (result == ESP_OK) {
+        void *old_root = NULL;
+        result = screen->config.renderer.swap_root(
+            screen->config.renderer.context, new_root, &old_root);
+        if (result != ESP_OK) {
+            set_error_stage(screen, "renderer_swap");
+        } else {
+            memcpy(screen->selected_assets_manifest,
+                   command->document->bytes + assets_start,
+                   assets_end - assets_start);
+            screen->selected_assets_manifest_bytes = assets_end - assets_start;
+            memcpy(screen->selected_screen_manifest,
+                   command->document->bytes + screen_start,
+                   screen_end - screen_start);
+            screen->selected_screen_manifest_bytes = screen_end - screen_start;
+            screen->current = *candidate;
+            screen->current_root = new_root;
+            screen->bound_epoch = command->expected_epoch;
+            screen->bound_snapshot_generation = command->snapshot_generation;
+            new_root = old_root;
+        }
+    }
+    if (renderer_locked) {
+        screen->config.renderer.unlock(screen->config.renderer.context);
+    }
+    if (new_root != NULL) {
+        screen->config.renderer.destroy_root(
+            screen->config.renderer.context, new_root);
+    }
+    if (result == ESP_OK) {
+        *event = (vk_usb_screen_event_t){
+            .kind = VK_USB_SCREEN_EVENT_COMMITTED,
+            .previous_revision = candidate->previous_revision,
+            .revision = candidate->revision,
+        };
+        snprintf(event->assets_manifest_sha256,
+                 sizeof(event->assets_manifest_sha256), "%s",
+                 candidate->assets_manifest_sha256);
+        snprintf(event->screen_manifest_sha256,
+                 sizeof(event->screen_manifest_sha256), "%s",
+                 candidate->screen_manifest_sha256);
+    }
+    free(candidate);
+    unlock_screen(screen);
+    return result;
 }
 
 esp_err_t vk_screen_restore(vk_screen_t *screen, uint32_t revision, uint32_t previous_revision,

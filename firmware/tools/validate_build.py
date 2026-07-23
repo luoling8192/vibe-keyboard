@@ -41,6 +41,7 @@ required_definitions = [
     "#define CONFIG_ESP_SYSTEM_PANIC_SILENT_REBOOT 1",
     "#define CONFIG_FREERTOS_HZ 1000",
     "#define CONFIG_ESP_MAIN_TASK_STACK_SIZE 8192",
+    "#define CONFIG_SPIFFS_OBJ_NAME_LEN 96",
 ]
 missing = [item for item in required_definitions if item not in compiled_sdkconfig]
 if missing:
@@ -80,7 +81,7 @@ objdump = os.environ.get(
     "OBJDUMP",
     nm.removesuffix("-nm") + "-objdump" if nm.endswith("-nm") else "xtensa-esp32s3-elf-objdump",
 )
-disassembly = subprocess.run(
+instruction_dump = subprocess.run(
     [objdump, "-d", str(BUILD / "vibe_keyboard.elf")],
     check=True,
     capture_output=True,
@@ -117,7 +118,7 @@ stack_frames = {}
 for name, maximum in stack_frame_limits.items():
     body_match = re.search(
         rf"^[0-9a-f]+ <{re.escape(name)}>:\n(.*?)(?=^\s*$)",
-        disassembly,
+        instruction_dump,
         re.MULTILINE | re.DOTALL,
     )
     if body_match is None:

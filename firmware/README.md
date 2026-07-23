@@ -30,15 +30,17 @@ and all build output are intentionally ignored.
 ## Flashing
 
 The current device recovery path keeps the original bootloader and writes only
-the custom application at `0x20000`. Enter ROM download mode, then run:
+the custom application at `0x20000`. Run:
 
 ```bash
 python3 tools/auto_flash.py build /dev/cu.usbmodemXXXX
 ```
 
 The helper validates the target build, writes only the application partition,
-and verifies the written bytes. It does not erase or overwrite the bootloader,
-partition table, NVS, OTA metadata, or asset storage.
+and verifies the written bytes. It first accepts an already active ROM loader,
+then tries the USB automatic-reset sequence. If automatic entry is unavailable,
+hold K1 while reconnecting USB and run it again. It does not erase or overwrite
+the bootloader, partition table, NVS, OTA metadata, or asset storage.
 
 Do not use `idf.py flash` until the replacement bootloader has completed a
 separate hardware recovery and rollback review.

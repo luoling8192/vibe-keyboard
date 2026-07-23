@@ -175,6 +175,7 @@ static void test_image_commit_and_preservation(void)
     vk_usb_json_document_t document;vk_usb_screen_command_t cmd=command(body,&document,VK_USB_SCREEN_IMAGE,0,1);vk_usb_screen_event_t event;
     assert(vk_screen_commit(&screen,&cmd,&event)==ESP_OK);assert(event.revision==1&&screen.current.configured&&renderer.swaps==1);
     renderer.fail_create=true;cmd.revision=2;cmd.expected_revision=1;assert(vk_screen_commit(&screen,&cmd,&event)==ESP_FAIL);assert(screen.current.revision==1&&renderer.swaps==1);
+    renderer.fail_create=false;assert(vk_screen_commit(&screen,&cmd,&event)==ESP_OK);assert(event.revision==2&&screen.current.revision==2&&renderer.swaps==2);
     assert(vk_screen_stop(&screen)==ESP_OK);
 }
 

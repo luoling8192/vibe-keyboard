@@ -49,7 +49,7 @@ struct InputTypesTests {
         let actions: [HostAction] = [
             .none, .voiceInput, .sendEnter, .systemCopy, .interruptControlC,
             .wakeApplication, .pasteText("hello"),
-            .customShortcut(try KeyboardShortcut(modifiers: [.command, .shift], key: "K")),
+            .customShortcut(try KeyboardShortcut(modifiers: [.command, .function, .shift], key: "K")),
             .customCommand(try CommandSpecification(executable: "/usr/bin/true", timeoutMilliseconds: 1000)),
             .launchApplication(bundleIdentifier: "com.apple.TextEdit"),
             .screenMode(.pet), .petInteraction("wave"),

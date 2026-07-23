@@ -62,8 +62,150 @@ struct VibeBoardDiagnostic {
             try await captureKeys(descriptor: select(descriptors), durationSeconds: duration)
         case .screen:
             try await commitAcceptanceScreen(descriptor: select(descriptors))
+        case let .image(inputURL):
+            try await uploadAndCommitImage(descriptor: select(descriptors), inputURL: inputURL)
         case let .record(outputURL, timeout):
             try await record(descriptor: select(descriptors), outputURL: outputURL, timeoutSeconds: timeout)
+        }
+    }
+
+    private static func uploadAndCommitImage(
+        descriptor: USBDeviceDescriptor,
+        inputURL: URL
+    ) async throws {
+        let session = try USBSession(descriptor: descriptor)
+        let transfer = AssetTransferService(session: session)
+        let committed = Task { () throws -> ReplacementScreenEvent in
+            for await event in session.events {
+                switch event {
+                case let .replacementEvent(.screen(screen)):
+                    if case .committed = screen { return screen }
+                case let .replacementEvent(.error(error)) where error.operation == "screen":
+                    throw USBSessionError.protocolFailure(
+                        "screen \(error.code)\(error.message.map { ": \($0)" } ?? "")"
+                    )
+                case let .stateChanged(.failed(error)):
+                    throw error
+                default:
+                    continue
+                }
+            }
+            throw USBSessionError.cancelled
+        }
+        var transferID: UInt32?
+        do {
+            _ = try await session.connect()
+            guard let context = await session.currentReplacementContext(),
+                  case let .available(assets)? = context.snapshot.assets,
+                  assets.management,
+                  assets.storageState == .ready,
+                  case .available? = context.snapshot.screen else {
+                throw AssetServiceError.capabilityUnavailable
+            }
+            let source = try AssetSourceDecoder.decode(
+                Data(contentsOf: inputURL, options: .mappedIfSafe),
+                minimumFrameMS: assets.minFrameMS,
+                maximumFrameMS: assets.maxFrameMS
+            )
+            let limits = VKA1Limits(
+                maxFrames: assets.maxFrames,
+                minFrameDurationMS: assets.minFrameMS,
+                maxFrameDurationMS: assets.maxFrameMS,
+                maxContainerBytes: assets.maxAssetBytes,
+                maxDecodedBytes: assets.maxActiveDecodedBytes
+            )
+            let container = try ConvertedAssetFactory.makeVKA1(
+                source: source,
+                fit: .contain,
+                background: AssetRGB888(red: 0, green: 0, blue: 0),
+                limits: limits
+            )
+            let asset = try PreparedAsset(data: container, limits: limits)
+            guard asset.kind == .image else { throw AssetServiceError.invalidAsset }
+            let id = UInt32.random(in: 1...UInt32.max)
+            transferID = id
+            let progress = try await transfer.upload(asset, transferID: id)
+            transferID = nil
+
+            guard let latest = await session.currentReplacementContext(),
+                  case let .available(latestScreen)? = latest.snapshot.screen else {
+                let state = await session.currentState()
+                let diagnostics = await session.diagnostics()
+                throw USBSessionError.protocolFailure(
+                    "screen context unavailable after upload; state=\(state); " +
+                    "diagnostics=\(diagnostics.entries.suffix(4).joined(separator: " | "))"
+                )
+            }
+            let previousRevision = latestScreen.revision
+            let revision = previousRevision &+ 1
+            guard revision != 0 else {
+                throw USBSessionError.protocolFailure("screen revision exhausted")
+            }
+            let commit = ScreenCommit(
+                expectedRevision: previousRevision,
+                revision: revision,
+                assets: [
+                    ScreenAssetReference(
+                        bytes: progress.totalBytes,
+                        kind: asset.kind,
+                        sha256: asset.sha256
+                    ),
+                ],
+                payload: .image(
+                    ScreenImage(backgroundRGB888: 0, fit: .contain, sha256: asset.sha256)
+                ),
+                limits: .init(
+                    displayWidth: latest.snapshot.display.width,
+                    displayHeight: latest.snapshot.display.height,
+                    screen: latestScreen
+                )
+            )
+            try await session.sendScreenCommand(.commit(commit))
+            let event = try await withThrowingTaskGroup(of: ReplacementScreenEvent.self) { group in
+                group.addTask { try await committed.value }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(5))
+                    committed.cancel()
+                    throw ConnectedDiagnosticError.screenTimedOut
+                }
+                defer { group.cancelAll() }
+                guard let value = try await group.next() else {
+                    throw ConnectedDiagnosticError.screenTimedOut
+                }
+                return value
+            }
+            guard case let .committed(_, acceptedPreviousRevision, acceptedRevision, _) = event,
+                  acceptedPreviousRevision == previousRevision,
+                  acceptedRevision == revision else {
+                throw USBSessionError.protocolFailure("unexpected screen response")
+            }
+            await session.disconnect()
+            print(
+                "image_committed sha256=\(asset.sha256) bytes=\(progress.totalBytes) " +
+                "previous_revision=\(previousRevision) revision=\(revision)"
+            )
+        } catch {
+            let state = await session.currentState()
+            let diagnostics = await session.diagnostics()
+            FileHandle.standardError.write(Data("session_state=\(state)\n".utf8))
+            if !diagnostics.text.isEmpty {
+                FileHandle.standardError.write(
+                    Data("device_diagnostics=\(diagnostics.text)\n".utf8)
+                )
+            }
+            for entry in diagnostics.entries.suffix(12) {
+                FileHandle.standardError.write(Data("session_diagnostic=\(entry)\n".utf8))
+            }
+            if let transferID {
+                do {
+                    try await transfer.cancel(transferID: transferID)
+                } catch {
+                    FileHandle.standardError.write(Data("abort_error=\(error)\n".utf8))
+                }
+            }
+            committed.cancel()
+            await session.disconnect()
+            throw error
         }
     }
 
@@ -218,6 +360,8 @@ struct VibeBoardDiagnostic {
                 switch event {
                 case let .audioFrame(frame):
                     try await workflow.consume(frame)
+                case let .replacementEvent(.error(error)) where error.operation == "input":
+                    throw ConnectedDiagnosticError.recordingFailed(error.code)
                 case let .stateChanged(state):
                     switch state {
                     case .disconnected:

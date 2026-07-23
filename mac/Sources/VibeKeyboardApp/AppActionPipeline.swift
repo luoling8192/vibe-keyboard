@@ -42,17 +42,10 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
     }
 
     func sendShortcut(_ shortcut: KeyboardShortcut) async throws {
-        guard let scalar = shortcut.key.lowercased().unicodeScalars.first,
-              shortcut.key.unicodeScalars.count == 1,
-              let code = Self.keyCodes[scalar] else {
+        guard let code = Self.keyCode(forShortcutKey: shortcut.key) else {
             throw ProductionActionError.unsupported("shortcut key \(shortcut.key)")
         }
-        var flags: CGEventFlags = []
-        if shortcut.modifiers.contains(.command) { flags.insert(.maskCommand) }
-        if shortcut.modifiers.contains(.control) { flags.insert(.maskControl) }
-        if shortcut.modifiers.contains(.option) { flags.insert(.maskAlternate) }
-        if shortcut.modifiers.contains(.shift) { flags.insert(.maskShift) }
-        try postKey(code: code, flags: flags)
+        try postKey(code: code, flags: Self.flags(for: shortcut.modifiers))
     }
 
     func wakeApplication() async throws {
@@ -66,7 +59,9 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
         _ = try await NSWorkspace.shared.openApplication(at: url, configuration: .init())
     }
 
-    func toggleVoiceInput() async throws {}
+    func toggleVoiceInput() async throws {
+        // The device owns capture start/stop for its configured voice key.
+    }
 
     func activate(mode: ScreenMode) async throws {
         guard let screenHandler else { throw ProductionActionError.unsupported("screen mode") }
@@ -88,7 +83,25 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
         up.post(tap: .cghidEventTap)
     }
 
-    private static let keyCodes: [UnicodeScalar: CGKeyCode] = [
+    static func keyCode(forShortcutKey key: String) -> CGKeyCode? {
+        let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.unicodeScalars.count == 1, let scalar = normalized.unicodeScalars.first {
+            return characterKeyCodes[scalar]
+        }
+        return namedKeyCodes[normalized]
+    }
+
+    static func flags(for modifiers: Set<KeyboardShortcut.Modifier>) -> CGEventFlags {
+        var flags: CGEventFlags = []
+        if modifiers.contains(.command) { flags.insert(.maskCommand) }
+        if modifiers.contains(.control) { flags.insert(.maskControl) }
+        if modifiers.contains(.function) { flags.insert(.maskSecondaryFn) }
+        if modifiers.contains(.option) { flags.insert(.maskAlternate) }
+        if modifiers.contains(.shift) { flags.insert(.maskShift) }
+        return flags
+    }
+
+    private static let characterKeyCodes: [UnicodeScalar: CGKeyCode] = [
         "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
         "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15,
         "y": 16, "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22,
@@ -97,11 +110,24 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
         "j": 38, "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44,
         "n": 45, "m": 46, ".": 47, "`": 50,
     ]
+
+    private static let namedKeyCodes: [String: CGKeyCode] = [
+        "return": 36, "enter": 36, "tab": 48, "space": 49,
+        "delete": 51, "backspace": 51, "escape": 53, "esc": 53, "fn": 63,
+        "help": 114, "home": 115, "pageup": 116, "forwarddelete": 117,
+        "end": 119, "pagedown": 121,
+        "left": 123, "right": 124, "down": 125, "up": 126,
+        "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97,
+        "f7": 98, "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111,
+        "f13": 105, "f14": 107, "f15": 113, "f16": 106,
+        "f17": 64, "f18": 79, "f19": 80, "f20": 90,
+    ]
 }
 
 protocol AppActionRouting: Sendable {
     func updateProfile(_ profile: KeyMappingProfile) async throws
     func consume(_ event: DeviceKeyEvent, at timestampMilliseconds: UInt64) async throws -> [ActionExecutionResult]
+    func execute(_ action: HostAction) async throws -> ActionExecutionResult
     func disconnect(at timestampMilliseconds: UInt64) async throws
 }
 
@@ -136,6 +162,10 @@ actor AppGestureActionPipeline: AppActionRouting {
         var results: [ActionExecutionResult] = []
         for gesture in routed { results.append(try await actions.execute(gesture)) }
         return results
+    }
+
+    func execute(_ action: HostAction) async throws -> ActionExecutionResult {
+        try await actions.execute(action)
     }
 
     func disconnect(at timestampMilliseconds: UInt64) async throws {

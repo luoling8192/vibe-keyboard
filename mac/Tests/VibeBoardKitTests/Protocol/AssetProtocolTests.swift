@@ -290,11 +290,23 @@ struct AssetProtocolTests {
         #expect(progress == .asset(.progress(transferID: 7, nextOffset: 12)))
         let state = try ReplacementEventDecoder.decode(Data(#"{"assets_manifest_sha256":null,"configured":false,"configured_mode":null,"event":"vk_screen_state","revision":0,"screen_manifest_sha256":null}"#.utf8))
         #expect(state == .screen(.state(configured: false, mode: nil, revision: 0, assetsManifestSHA256: nil, screenManifestSHA256: nil)))
+        let inputError = try ReplacementEventDecoder.decode(Data(#"{"code":"audio_start_failed","event":"vk_error","operation":"input"}"#.utf8))
+        #expect(inputError == .error(.init(
+            operation: "input",
+            code: "audio_start_failed",
+            transferID: nil,
+            nextOffset: nil,
+            sha256: nil,
+            message: nil
+        )))
     }
 
     @Test func rejectsOperationSpecificErrorFieldsAndFloatingEventIntegers() {
         #expect(throws: ReplacementProtocolError.invalidKeys(context: "vk_error.screen")) {
             try ReplacementEventDecoder.decode(Data(#"{"code":"internal","event":"vk_error","operation":"screen","transfer_id":1}"#.utf8))
+        }
+        #expect(throws: ReplacementProtocolError.invalidKeys(context: "vk_error.input")) {
+            try ReplacementEventDecoder.decode(Data(#"{"code":"audio_start_failed","event":"vk_error","message":"extra","operation":"input"}"#.utf8))
         }
         #expect(throws: ReplacementProtocolError.invalidValue(field: "next_offset")) {
             try ReplacementEventDecoder.decode(Data(#"{"event":"vk_asset_progress","next_offset":12.0,"transfer_id":7}"#.utf8))

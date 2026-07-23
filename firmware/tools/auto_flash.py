@@ -59,6 +59,9 @@ def validate_build():
     if "#define CONFIG_SPIRAM_XIP_FROM_PSRAM 1" not in compiled_config:
         print("ERROR: Refusing to flash a build without PSRAM XIP")
         return False
+    if "#define CONFIG_SPIFFS_OBJ_NAME_LEN 96" not in compiled_config:
+        print("ERROR: Refusing to flash a build with truncated SPIFFS asset names")
+        return False
     panic_modes = (
         "#define CONFIG_ESP_SYSTEM_PANIC_SILENT_REBOOT 1",
         "#define CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT 1",
@@ -71,15 +74,21 @@ def validate_build():
     print(f"Validated app SHA-256: {digest}")
     return app
 
-def check_device(port):
+def probe_device(port, before):
     result = subprocess.run(
         [sys.executable, "-m", "esptool", "--chip", "esp32s3",
          "--port", port, "--baud", "115200",
-         "--before", "no_reset", "--after", "no_reset", "--no-stub",
+         "--before", before, "--after", "no_reset", "--no-stub",
          "chip_id"],
         timeout=15,
     )
     return result.returncode == 0
+
+def check_device(port):
+    if probe_device(port, "no_reset"):
+        return True
+    print(f"Manual ROM probe failed on {port}; trying USB automatic reset.")
+    return probe_device(port, "default_reset")
 
 def do_flash(port, app):
     print("\n>>> FLASHING APPLICATION PARTITION ONLY <<<")
@@ -106,7 +115,7 @@ try:
     port = next((candidate for candidate in resolve_ports() if check_device(candidate)), None)
     if port is None:
         raise SystemExit(
-            "ERROR: Device is not in ROM download mode. Hold K1 while reconnecting USB, "
+            "ERROR: Automatic ROM entry failed. Hold K1 while reconnecting USB, "
             "then run this command again."
         )
     print(f"Using {port}")
@@ -114,7 +123,7 @@ try:
         raise SystemExit("ERROR: Flash or read-back verification failed.")
 except subprocess.TimeoutExpired:
     raise SystemExit(
-        "ERROR: Device is not in ROM download mode. Hold K1 while reconnecting USB, "
+        "ERROR: Automatic ROM entry timed out. Hold K1 while reconnecting USB, "
         "then run this command again."
     )
 print("\nFLASH AND READ-BACK VERIFICATION COMPLETE")

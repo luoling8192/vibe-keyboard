@@ -24,6 +24,7 @@ INPUT = (ROOT / "components/vk_input/vk_input.c").read_text()
 ASSET_STORE = (ROOT / "components/vk_assets/vk_asset_store.c").read_text()
 SCREEN = (ROOT / "components/vk_screen/vk_screen.c").read_text()
 SCREEN_PRODUCT = (ROOT / "components/vk_screen/vk_screen_product.c").read_text()
+SCREEN_SERVICE_HEADER = (ROOT / "components/vk_screen/include/vk_screen_service.h").read_text()
 SDK_DEFAULTS = (ROOT / "sdkconfig.defaults").read_text()
 PANEL = (ROOT / "components/vk_board/vk_nv3007.c").read_text()
 TABLE = (ROOT / "components/vk_board/vk_nv3007_init.inc").read_text()
@@ -296,6 +297,10 @@ class HardwareContractTests(unittest.TestCase):
         self.assertIn('"#define CONFIG_ESP_MAIN_TASK_STACK_SIZE 8192"', AUTO_FLASH)
         self.assertIn('"#define CONFIG_SPIRAM_XIP_FROM_PSRAM 1"', VALIDATE_BUILD)
         self.assertIn('"#define CONFIG_SPIRAM_XIP_FROM_PSRAM 1"', AUTO_FLASH)
+        self.assertIn('"#define CONFIG_SPIFFS_OBJ_NAME_LEN 96"', VALIDATE_BUILD)
+        self.assertIn('"#define CONFIG_SPIFFS_OBJ_NAME_LEN 96"', AUTO_FLASH)
+        self.assertIn('probe_device(port, "no_reset")', AUTO_FLASH)
+        self.assertIn('probe_device(port, "default_reset")', AUTO_FLASH)
         self.assertIn('"--before", "no_reset", "--after", "watchdog_reset"', AUTO_FLASH)
         self.assertEqual(macro("VK_KEY_DEBOUNCE_TICKS"), "2")
         self.assertEqual(macro("VK_KEY_ACTIVE_LEVEL"), "0")
@@ -322,7 +327,10 @@ class HardwareContractTests(unittest.TestCase):
             "vk_usb_json_document_t assets_document, screen_document",
             SCREEN_PRODUCT,
         )
-        self.assertIn("vk_screen_model_t *candidate=calloc(1U,sizeof(*candidate))", SCREEN)
+        self.assertRegex(
+            SCREEN,
+            r"vk_screen_model_t \*candidate\s*=\s*calloc\(1U,\s*sizeof\(\*candidate\)\)",
+        )
         self.assertNotIn("vk_screen_model_t candidate;", SCREEN)
         for workspace in [
             "uint8_t dispatch[VK_USB_MAX_FRAME_BYTES]",
@@ -460,6 +468,22 @@ class HardwareContractTests(unittest.TestCase):
 
 
 class ScreenAssetContractTests(unittest.TestCase):
+    def test_product_budget_admits_full_screen_replacement(self):
+        budget = re.search(
+            r"#define VK_SCREEN_SERVICE_DECODE_BUDGET_BYTES (\d+)U",
+            SCREEN_SERVICE_HEADER,
+        )
+        scratch = re.search(
+            r"#define VK_SCREEN_SERVICE_DECODER_SCRATCH_BYTES (\d+)U",
+            SCREEN_SERVICE_HEADER,
+        )
+        self.assertIsNotNone(budget)
+        self.assertIsNotNone(scratch)
+        self.assertGreaterEqual(
+            int(budget.group(1)),
+            2 * 428 * 142 * 2 + int(scratch.group(1)),
+        )
+
     def test_canonical_fixture_is_byte_exact_and_font_hash_bound(self):
         fixture_bytes = SCREEN_ASSET_FIXTURE.read_bytes()
         self.assertFalse(fixture_bytes.endswith(b"\n"))

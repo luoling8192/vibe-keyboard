@@ -24,6 +24,30 @@ struct AssetTransferServiceTests {
         }
     }
 
+    @Test func backendDetailIsSurfacedAndCancelWaitsForDeviceAbort() async throws {
+        let fixture = try assetFixture()
+        let session = TransferSessionDouble(context: fixture.context)
+        await session.setOutcome(
+            .rejected(
+                transferID: 9,
+                code: "write_failed",
+                nextOffset: nil,
+                message: "phase=end;esp_err=0xffffffff"
+            ),
+            for: 9
+        )
+        let service = AssetTransferService(session: session, timeout: .seconds(1))
+        await #expect(
+            throws: AssetServiceError.deviceRejected(
+                "write_failed(phase=end;esp_err=0xffffffff)"
+            )
+        ) {
+            try await service.upload(fixture.asset, transferID: 9)
+        }
+        try await service.cancel(transferID: 9)
+        #expect(await session.currentAssetTransferOutcome(transferID: 9) == nil)
+    }
+
     private func assetFixture() throws -> (asset: PreparedAsset, context: ReplacementSessionContext) {
         let limits = VKA1Limits(maxFrames: 1, minFrameDurationMS: 20, maxFrameDurationMS: 5_000, maxContainerBytes: 524_288, maxDecodedBytes: 131_072)
         let data = try VKA1Codec.encode(kind: .image, width: 1, height: 1, frames: [.init(pixels: [0], durationMS: 0)], limits: limits)
@@ -39,7 +63,11 @@ private actor TransferSessionDouble: AssetTransferSession {
 
     init(context: ReplacementSessionContext) { self.context = context }
     func setOutcome(_ outcome: AssetTransferOutcome, for id: UInt32) { outcomes[id] = outcome }
-    func sendAssetCommand(_ command: AssetCommand, timeout: Duration) async throws {}
+    func sendAssetCommand(_ command: AssetCommand, timeout: Duration) async throws {
+        if case .abort(let transferID) = command {
+            outcomes[transferID] = .aborted(transferID: transferID)
+        }
+    }
     func sendAssetChunk(_ payload: Data, using authorization: ActiveAssetTransfer, timeout: Duration) async throws {}
     func currentActiveAssetTransfer() -> ActiveAssetTransfer? { nil }
     func currentAssetTransferOutcome(transferID: UInt32) -> AssetTransferOutcome? { outcomes[transferID] }

@@ -15,9 +15,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/sha256.h"
+#include "sdkconfig.h"
 
 #define BASE "/vkassets"
 #define LABEL "storage"
+
+_Static_assert(CONFIG_SPIFFS_OBJ_NAME_LEN >= VK_ASSET_SPIFFS_NAME_MIN_BYTES,
+               "SPIFFS object names cannot hold immutable asset paths");
 
 typedef struct { bool mounted; } spiffs_context_t;
 static spiffs_context_t context;

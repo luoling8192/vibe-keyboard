@@ -42,6 +42,7 @@ typedef struct {
     uint32_t catalog_next_cursor;
     uint64_t catalog_deadline_ms;
     size_t catalog_count;
+    char last_error_detail[80];
     vk_usb_asset_list_entry_t catalog[VK_ASSET_TRANSFER_MAX_CATALOG_ENTRIES];
 } vk_asset_transfer_service_t;
 
