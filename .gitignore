@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager
+mac/.build/
+mac/.swiftpm/
+mac/dist/
+*.profraw
+
+# Python
+.pytest_cache/
+**/__pycache__/
+*.py[cod]
+
+# ESP-IDF
+firmware/build*/
+firmware/build*-sdkconfig
+firmware/**/build/
+firmware/**/managed_components/
+firmware/**/sdkconfig
+firmware/**/sdkconfig.old
+firmware/**/sdkconfig.bak
+firmware/sdkconfig.review-*
+
+# Editors
+.idea/
+.vscode/
