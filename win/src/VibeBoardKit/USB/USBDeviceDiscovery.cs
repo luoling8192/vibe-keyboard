@@ -59,7 +59,6 @@ public static class USBDeviceDiscovery
     public static string NormalizeDeviceID(string serialNumber)
     {
         string hex = serialNumber.ToUpperInvariant();
-        // Keep only hex characters
         var sb = new System.Text.StringBuilder();
         foreach (char c in hex)
         {
@@ -74,106 +73,165 @@ public static class USBDeviceDiscovery
 
     /// <summary>
     /// Find all matching USB serial devices currently connected.
+    /// 
+    /// ESP32-S3 USB Serial/JTAG presents as a USB Composite Device with
+    /// multiple interfaces (MI_00 = CDC COM port, MI_02 = JTAG).
+    /// We need to:
+    /// 1. Find the composite parent device to get the real USB serial number
+    /// 2. Find the MI_00 child that has a COM port
     /// </summary>
     public static List<USBDeviceDescriptor> FindDevices()
     {
         var result = new List<USBDeviceDescriptor>();
         var seen = new HashSet<string>();
 
-        // Use WMI to find PnP devices with matching VID/PID
-        // The DeviceID field looks like: USB\VID_303A&PID_1001\...
-        using var searcher = new ManagementObjectSearcher(
-            "SELECT * FROM Win32_PnPEntity WHERE PNPDeviceID LIKE '%VID_303A&PID_1001%'");
+        // Step 1: Find the composite parent device (no MI_xx in the ID)
+        // Its PnP ID looks like: USB\VID_303A&PID_1001\14:C1:9F:DA:66:D4
+        string? parentSerial = null;
+        string? parentPnpId = null;
 
-        foreach (var obj in searcher.Get())
+        using (var searcher = new ManagementObjectSearcher(
+            "SELECT * FROM Win32_PnPEntity WHERE PNPDeviceID LIKE '%VID_303A&PID_1001%'"))
         {
-            var pnpDeviceID = obj["PNPDeviceID"] as string;
-            if (pnpDeviceID == null) continue;
-
-            // Extract serial number from PnP device ID
-            // Format: USB\VID_303A&PID_1001\<serial>
-            var parts = pnpDeviceID.Split('\\');
-            if (parts.Length < 3) continue;
-            string serial = parts[2];
-
-            // Find the COM port name associated with this device
-            string? portName = FindComPortForDevice(pnpDeviceID);
-            if (portName == null) continue;
-
-            string normalizedID;
-            try
+            foreach (var obj in searcher.Get())
             {
-                normalizedID = NormalizeDeviceID(serial);
-            }
-            catch (USBDiscoveryException)
-            {
-                continue;
-            }
+                var pnpId = obj["PNPDeviceID"] as string;
+                if (pnpId == null) continue;
 
-            if (seen.Contains(portName)) continue;
-            seen.Add(portName);
+                // The composite parent has NO MI_xx in the path
+                if (pnpId.Contains("&MI_", StringComparison.OrdinalIgnoreCase))
+                    continue;
 
-            result.Add(new USBDeviceDescriptor(
-                pnpDeviceID, TargetVendorID, TargetProductID,
-                serial, normalizedID, portName));
+                var parts = pnpId.Split('\\');
+                if (parts.Length < 3) continue;
+
+                parentSerial = parts[2];
+                parentPnpId = pnpId;
+                break;
+            }
         }
 
-        // Sort by device ID for deterministic ordering
+        // Step 2: Find all child interfaces with MI_xx and locate the COM port
+        // We want MI_00 (the CDC serial interface), not MI_02 (JTAG)
+        using (var childSearcher = new ManagementObjectSearcher(
+            "SELECT * FROM Win32_PnPEntity WHERE PNPDeviceID LIKE '%VID_303A&PID_1001&MI_%'"))
+        {
+            foreach (var obj in childSearcher.Get())
+            {
+                var pnpId = obj["PNPDeviceID"] as string;
+                if (pnpId == null) continue;
+
+                // We want the CDC interface (MI_00), not JTAG (MI_02)
+                if (!pnpId.Contains("&MI_00", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Find the COM port for this child device
+                string? portName = FindComPort(pnpId);
+                if (portName == null) continue;
+
+                // Use the parent's serial number
+                string serial = parentSerial ?? pnpId.Split('\\').LastOrDefault() ?? "unknown";
+                string normalizedID;
+                try
+                {
+                    normalizedID = NormalizeDeviceID(serial);
+                }
+                catch (USBDiscoveryException)
+                {
+                    // If serial from parent isn't usable, try extracting from the child
+                    var childParts = pnpId.Split('\\');
+                    if (childParts.Length >= 3)
+                    {
+                        try { normalizedID = NormalizeDeviceID(childParts[2]); }
+                        catch (USBDiscoveryException) { continue; }
+                    }
+                    else continue;
+                }
+
+                if (seen.Contains(portName)) continue;
+                seen.Add(portName);
+
+                result.Add(new USBDeviceDescriptor(
+                    pnpId, TargetVendorID, TargetProductID,
+                    serial, normalizedID, portName));
+            }
+        }
+
+        // Fallback: if no composite device was found, try the old approach
+        // (some devices may not present as composite)
+        if (result.Count == 0)
+        {
+            using var searcher = new ManagementObjectSearcher(
+                "SELECT * FROM Win32_PnPEntity WHERE PNPDeviceID LIKE '%VID_303A&PID_1001%'");
+
+            foreach (var obj in searcher.Get())
+            {
+                var pnpId = obj["PNPDeviceID"] as string;
+                if (pnpId == null) continue;
+
+                string? portName = FindComPort(pnpId);
+                if (portName == null) continue;
+
+                var parts = pnpId.Split('\\');
+                if (parts.Length < 3) continue;
+                string serial = parts[2];
+
+                string normalizedID;
+                try { normalizedID = NormalizeDeviceID(serial); }
+                catch (USBDiscoveryException) { continue; }
+
+                if (seen.Contains(portName)) continue;
+                seen.Add(portName);
+
+                result.Add(new USBDeviceDescriptor(
+                    pnpId, TargetVendorID, TargetProductID,
+                    serial, normalizedID, portName));
+            }
+        }
+
         result.Sort((a, b) => string.Compare(a.DeviceID, b.DeviceID, StringComparison.Ordinal));
         return result;
     }
 
     /// <summary>
-    /// Find the COM port name (e.g., "COM3") associated with a PnP device.
+    /// Find the COM port name for a PnP device.
     /// </summary>
-    private static string? FindComPortForDevice(string pnpDeviceID)
+    private static string? FindComPort(string pnpDeviceId)
     {
-        // Query Win32_SerialPort or use registry to find COM port
-        // On Windows, we can also check Win32_PnPEntity for devices that have "COM" in their caption
-        using var searcher = new ManagementObjectSearcher(
-            "SELECT * FROM Win32_PnPEntity WHERE PNPDeviceID LIKE '%VID_303A&PID_1001%'");
-
-        foreach (var obj in searcher.Get())
-        {
-            var id = obj["PNPDeviceID"] as string;
-            if (id != pnpDeviceID) continue;
-
-            // Check for COM port in the caption or name
-            var caption = obj["Caption"] as string ?? "";
-            var name = obj["Name"] as string ?? "";
-
-            // Look for (COMx) pattern
-            var match = Regex.Match(caption + " " + name, @"\((COM\d+)\)");
-            if (match.Success)
-                return match.Groups[1].Value;
-
-            // Sometimes the port is in a different property
-            // Try to find it via registry
-            return FindComPortViaRegistry(pnpDeviceID);
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// Fallback: find COM port via registry lookup.
-    /// </summary>
-    private static string? FindComPortViaRegistry(string pnpDeviceID)
-    {
+        // Approach 1: Look for (COMx) in the device's Caption/Name via WMI
         try
         {
-            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
-                @"SYSTEM\CurrentControlSet\Enum\" + pnpDeviceID);
-            if (key == null) return null;
-
-            foreach (var subKeyName in key.GetSubKeyNames())
+            // WQL requires escaping backslash; & is fine in WQL
+            var escaped = pnpDeviceId.Replace("\\", "\\\\");
+            using var searcher = new ManagementObjectSearcher(
+                $"SELECT * FROM Win32_PnPEntity WHERE PNPDeviceID = '{escaped}'");
+            foreach (var obj in searcher.Get())
             {
-                using var subKey = key.OpenSubKey(subKeyName);
-                if (subKey == null) continue;
+                var caption = obj["Caption"] as string ?? "";
+                var name = obj["Name"] as string ?? "";
+                var match = Regex.Match(caption + " " + name, @"\((COM\d+)\)");
+                if (match.Success)
+                    return match.Groups[1].Value;
+            }
+        }
+        catch { }
 
-                using var deviceParams = subKey.OpenSubKey("Device Parameters");
-                if (deviceParams?.GetValue("PortName") is string portName)
-                    return portName;
+        // Approach 2: Registry lookup for PortName under Device Parameters
+        try
+        {
+            var regPath = @"SYSTEM\CurrentControlSet\Enum\" + pnpDeviceId;
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(regPath);
+            if (key != null)
+            {
+                foreach (var subKeyName in key.GetSubKeyNames())
+                {
+                    using var subKey = key.OpenSubKey(subKeyName);
+                    if (subKey == null) continue;
+
+                    using var deviceParams = subKey.OpenSubKey("Device Parameters");
+                    if (deviceParams?.GetValue("PortName") is string portName)
+                        return portName;
+                }
             }
         }
         catch { }
@@ -205,19 +263,8 @@ public sealed class USBDeviceMonitor : IDisposable
     private List<USBDeviceDescriptor> _known = new();
     private bool _disposed;
 
-    /// <summary>
-    /// Raised when a device is attached. Passes the descriptor.
-    /// </summary>
     public event Action<USBDeviceDescriptor>? DeviceAttached;
-
-    /// <summary>
-    /// Raised when a device is detached. Passes the device ID.
-    /// </summary>
     public event Action<string>? DeviceDetached;
-
-    /// <summary>
-    /// Raised on discovery errors.
-    /// </summary>
     public event Action<Exception>? Error;
 
     public USBDeviceMonitor(TimeSpan? interval = null)
@@ -244,14 +291,12 @@ public sealed class USBDeviceMonitor : IDisposable
             var current = USBDeviceDiscovery.FindDevices();
             var currentIds = new HashSet<string>(current.Select(d => d.DeviceID));
 
-            // Find newly attached
             foreach (var desc in current)
             {
                 if (!_known.Any(k => k.DeviceID == desc.DeviceID))
                     DeviceAttached?.Invoke(desc);
             }
 
-            // Find detached
             foreach (var old in _known)
             {
                 if (!currentIds.Contains(old.DeviceID))

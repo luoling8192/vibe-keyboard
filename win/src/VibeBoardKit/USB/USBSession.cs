@@ -186,12 +186,16 @@ public sealed class SystemIOPortsOperations : ISerialPortOperations
             Handshake = Handshake.None,
             ReadBufferSize = 8192,
             WriteBufferSize = 8192,
-            ReadTimeout = 50,  // short timeout for non-blocking reads
+            ReadTimeout = 100,   // short timeout for non-blocking reads
             WriteTimeout = 2000,
-            DtrEnable = false,
+            DtrEnable = true,   // Enable DTR to reset ESP32-S3
             RtsEnable = false,
         };
         _port.Open();
+        // Give the device time to reset and re-enumerate
+        System.Threading.Thread.Sleep(100);
+        // Discard any garbage in the input buffer
+        _port.DiscardInBuffer();
     }
 
     public void ConfigureRaw()
@@ -1083,11 +1087,15 @@ public sealed class USBSession : IDisposable
         catch { /* queue full or cancelled, drop */ }
     }
 
+    private bool _terminated = false;
+
     private void Terminate(USBSessionState finalState)
     {
+        if (_terminated) return;
+        _terminated = true;
         _heartbeatTimer?.Dispose();
         _heartbeatTimer = null;
-        _cts.Cancel();
+        try { _cts.Cancel(); } catch (ObjectDisposedException) { }
         _operations.Dispose();
         SetState(finalState);
         try { _eventQueue.CompleteAdding(); } catch { }
@@ -1096,7 +1104,7 @@ public sealed class USBSession : IDisposable
     public void Dispose()
     {
         Terminate(USBSessionState.Disconnected);
-        _cts.Dispose();
-        _eventQueue.Dispose();
+        try { _cts.Dispose(); } catch { }
+        try { _eventQueue.Dispose(); } catch { }
     }
 }

@@ -61,7 +61,8 @@ public sealed class FrameStreamParser
 
             int writable = ReceiveBufferLimit - _buffer.Count;
             int count = Math.Min(writable, data.Length - offset);
-            _buffer.AddRange(data.AsSpan(offset, count));
+            for (int i = 0; i < count; i++)
+                _buffer.Add(data[offset + i]);
             offset += count;
             Drain(events);
         }

@@ -616,10 +616,11 @@ public sealed class AppModel : INotifyPropertyChanged, IDisposable
 
     public void Reconnect()
     {
-        if (_session?.Descriptor != null)
+        var descriptor = _session?.Descriptor;
+        if (descriptor != null)
         {
             Disconnect();
-            Attach(_session.Descriptor);
+            Attach(descriptor);
         }
     }
 

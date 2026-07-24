@@ -81,7 +81,7 @@
 
                     <Button Content="Reconnect" Margin="0,12,0,0" Padding="16,4"
                             Click="Reconnect_Click"
-                            IsEnabled="{Binding IsConnected, Converter={StaticResource InverseBooleanConverter}}"/>
+                            IsEnabled="{Binding IsConnected, Converter={x:Static vm:InverseBoolConverter.Instance}}"/>
                 </StackPanel>
             </Border>
         </StackPanel>
