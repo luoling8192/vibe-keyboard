@@ -19,6 +19,7 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
     private var screenHandler: (@MainActor @Sendable (ScreenMode) -> Void)?
     private var dashboardPageHandler: (@MainActor @Sendable () -> Void)?
     private var dashboardStocksHandler: (@MainActor @Sendable () -> Void)?
+    private var voiceHotkey: KeyboardShortcut?
 
     func setScreenHandler(_ handler: @escaping @MainActor @Sendable (ScreenMode) -> Void) {
         screenHandler = handler
@@ -69,8 +70,15 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
         _ = try await NSWorkspace.shared.openApplication(at: url, configuration: .init())
     }
 
+    func configureVoiceHotkey(_ shortcut: KeyboardShortcut?) {
+        voiceHotkey = shortcut
+    }
+
     func toggleVoiceInput() async throws {
-        // The device owns capture start/stop for its configured voice key.
+        // Posts the configured global hotkey to trigger a third-party dictation
+        // app (Typeless, Vokie, Superwhisper, etc.) which captures from BlackHole.
+        guard let shortcut = voiceHotkey else { return }
+        try await sendShortcut(shortcut)
     }
 
     func activate(mode: ScreenMode) async throws {

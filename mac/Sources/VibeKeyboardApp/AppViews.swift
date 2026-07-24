@@ -831,6 +831,13 @@ private enum ActionChoice: String, CaseIterable, Hashable {
 
 private struct AudioPage: View {
     @ObservedObject var model: AppModel
+    @State private var hotkeyKey = "d"
+    @State private var hotkeyCommand = true
+    @State private var hotkeyControl = false
+    @State private var hotkeyFunction = false
+    @State private var hotkeyOption = false
+    @State private var hotkeyShift = false
+
     var body: some View {
         Form {
             PageTitle(title: "Audio")
@@ -854,15 +861,101 @@ private struct AudioPage: View {
                 Text("Click to talk").tag(InteractionMode.clickToTalk)
             }
             .disabled(!model.isConnected)
+
+            Divider()
             Toggle("Save recordings to Application Support", isOn: $model.saveRecordings)
             Text("Saved files use an atomic private .ogg write in VibeKeyboard/Recordings. Raw PCM is never retained.")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("Recognition: unavailable until a reviewed provider contract exists").foregroundStyle(.secondary)
+
+            Divider()
+            Section {
+                Picker("Voice input mode", selection: Binding(
+                    get: { model.voiceInputMode },
+                    set: {
+                        model.voiceInputMode = $0
+                        model.saveVoiceInputSettings()
+                    }
+                )) {
+                    ForEach(VoiceInputMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+
+                if model.voiceInputMode == .blackhole {
+                    blackholeSection
+                }
+            } header: {
+                Text("Voice input routing")
+            }
+
             LabeledContent("Last recording", value: model.lastRecording)
             if let message = model.diagnosticMessage {
                 Text(message).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }
         }.formStyle(.grouped).padding(8)
+        .onAppear { loadHotkeyDraft() }
+    }
+
+    @ViewBuilder private var blackholeSection: some View {
+        // Device status
+        HStack {
+            Label(
+                model.blackholeAvailable ? "BlackHole detected" : "BlackHole not found",
+                systemImage: model.blackholeAvailable ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(model.blackholeAvailable ? .green : .orange)
+            Spacer()
+            Button("Refresh") { model.refreshBlackHoleAvailability() }
+            Button("Download BlackHole") {
+                if let url = URL(string: "https://github.com/ExistentialAudio/BlackHole") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        }
+        if !model.blackholeAvailable {
+            Text("Install BlackHole, then set it as the input device in your dictation app (Typeless, Vokie, etc.).")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+
+        // Trigger hotkey
+        Divider()
+        Text("Trigger hotkey")
+            .font(.headline)
+        Text("Set this to match the global hotkey in your dictation app. Pressing the voice key will simulate this shortcut.")
+            .font(.caption).foregroundStyle(.secondary)
+        TextField("Key (1, fn, f1…f20, home, pageup)", text: $hotkeyKey)
+            .frame(maxWidth: 240)
+        HStack {
+            Toggle("Command", isOn: $hotkeyCommand)
+            Toggle("Control", isOn: $hotkeyControl)
+            Toggle("Fn", isOn: $hotkeyFunction)
+            Toggle("Option", isOn: $hotkeyOption)
+            Toggle("Shift", isOn: $hotkeyShift)
+        }
+        HStack {
+            Button("Apply hotkey") { applyHotkey() }
+                .disabled(!hotkeyIsValid)
+            Spacer()
+            Button("Clear hotkey") {
+                model.setVoiceTriggerHotkey(nil)
+                loadHotkeyDraft()
+            }
+        }
+        Text(hotkeyPreview)
+            .font(.caption.monospaced())
+            .foregroundStyle(.secondary)
+
+        // Setup instructions
+        Divider()
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Setup").font(.caption.weight(.semibold))
+            Text("1. Install BlackHole (link above)")
+            Text("2. In your dictation app, set input device to BlackHole")
+            Text("3. In your dictation app, note the global hotkey")
+            Text("4. Set the same hotkey here")
+            Text("5. Select a voice key above and press it")
+        }
+        .font(.caption).foregroundStyle(.secondary)
     }
 
     private var stateLabel: String {
@@ -880,6 +973,45 @@ private struct AudioPage: View {
         case .failed(let error):
             return "Failed — \(String(describing: error))"
         }
+    }
+
+    // MARK: - Hotkey helpers
+
+    private var hotkeyModifiers: Set<VibeBoardKit.KeyboardShortcut.Modifier> {
+        var mods: Set<VibeBoardKit.KeyboardShortcut.Modifier> = []
+        if hotkeyCommand { mods.insert(.command) }
+        if hotkeyControl { mods.insert(.control) }
+        if hotkeyFunction { mods.insert(.function) }
+        if hotkeyOption { mods.insert(.option) }
+        if hotkeyShift { mods.insert(.shift) }
+        return mods
+    }
+
+    private var hotkeyIsValid: Bool {
+        !hotkeyKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var hotkeyPreview: String {
+        let parts = hotkeyModifiers.sorted().map { $0.rawValue.capitalized }
+        return (parts + [hotkeyKey.uppercased()]).joined(separator: " + ")
+    }
+
+    private func applyHotkey() {
+        guard let shortcut = try? VibeBoardKit.KeyboardShortcut(
+            modifiers: hotkeyModifiers,
+            key: hotkeyKey
+        ) else { return }
+        model.setVoiceTriggerHotkey(shortcut)
+    }
+
+    private func loadHotkeyDraft() {
+        guard let shortcut = model.voiceTriggerHotkey else { return }
+        hotkeyKey = shortcut.key
+        hotkeyCommand = shortcut.modifiers.contains(.command)
+        hotkeyControl = shortcut.modifiers.contains(.control)
+        hotkeyFunction = shortcut.modifiers.contains(.function)
+        hotkeyOption = shortcut.modifiers.contains(.option)
+        hotkeyShift = shortcut.modifiers.contains(.shift)
     }
 }
 

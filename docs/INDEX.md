@@ -7,6 +7,7 @@
 - [USB protocol contract](product/usb-protocol.md)
 - [Screen and asset contract](product/screen-assets.md)
 - [Buttons and audio contract](product/input-audio.md)
+- [Voice input: BlackHole virtual audio](product/voice-input-blackhole.md)
 - [LED feedback contract](product/led.md)
 
 ## Client

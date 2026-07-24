@@ -212,6 +212,20 @@ private struct CurrentScreenSelection: Equatable {
     var revision: UInt32
 }
 
+enum VoiceInputMode: String, CaseIterable, Identifiable {
+    case deviceCapture
+    case blackhole
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .deviceCapture: "Device capture (Ogg file)"
+        case .blackhole: "BlackHole → third-party app"
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var selectedPage: AppPage = .device
@@ -246,6 +260,10 @@ final class AppModel: ObservableObject {
     @Published var screenMode: ScreenMode = .image
     @Published private(set) var interactionMode: InteractionMode = .holdToTalk
     @Published var saveRecordings = false
+    @Published var voiceInputMode: VoiceInputMode = .deviceCapture
+    @Published var voiceTriggerHotkey: KeyboardShortcut?
+    @Published var blackholeDeviceName: String = "BlackHole 2ch"
+    @Published private(set) var blackholeAvailable = false
     @Published var layoutTitle: String = "Vibe Dashboard"
     @Published var widgetText: String = "Ready"
     @Published var stockSymbols: String = "sh000001"
@@ -279,6 +297,7 @@ final class AppModel: ObservableObject {
     private var petPreviewTask: Task<Void, Never>?
     private var session: (any AppDeviceSession)?
     private var audioRecorder: AudioRecordingSession?
+    private var livePipeline: LiveAudioPipeline?
     private var recordingSink: DataOggPageSink?
     private var recordingDestination: URL?
     private var currentScreenSelection: CurrentScreenSelection?
@@ -346,6 +365,14 @@ final class AppModel: ObservableObject {
         if [4, 6, 8, 10, 12].contains(storedDuration) {
             dashboardPageDurationSeconds = storedDuration
         }
+        if let mode = defaults.string(forKey: "voiceInput.mode"),
+           let m = VoiceInputMode(rawValue: mode) {
+            voiceInputMode = m
+        }
+        if let hotkeyData = defaults.data(forKey: "voiceInput.hotkey") {
+            voiceTriggerHotkey = try? JSONDecoder().decode(KeyboardShortcut.self, from: hotkeyData)
+        }
+        blackholeDeviceName = defaults.string(forKey: "voiceInput.blackholeDevice") ?? "BlackHole 2ch"
         Task { [weak self, adapter] in
             await adapter.setScreenHandler { [weak self] mode in
                 self?.screenMode = mode == .image ? .image : .dashboard
@@ -355,6 +382,33 @@ final class AppModel: ObservableObject {
                 nextPage: { [weak self] in self?.nextDashboardPage() },
                 nextStocks: { [weak self] in self?.nextDashboardStockPage() }
             )
+            await adapter.configureVoiceHotkey(self?.voiceTriggerHotkey)
+            self?.refreshBlackHoleAvailability()
+        }
+    }
+
+    func saveVoiceInputSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(voiceInputMode.rawValue, forKey: "voiceInput.mode")
+        if let hotkey = voiceTriggerHotkey,
+           let data = try? JSONEncoder().encode(hotkey) {
+            defaults.set(data, forKey: "voiceInput.hotkey")
+        } else {
+            defaults.removeObject(forKey: "voiceInput.hotkey")
+        }
+        defaults.set(blackholeDeviceName, forKey: "voiceInput.blackholeDevice")
+    }
+
+    func refreshBlackHoleAvailability() {
+        blackholeAvailable = BlackHoleAudioWriter.isAvailable(deviceName: blackholeDeviceName)
+    }
+
+    func setVoiceTriggerHotkey(_ shortcut: KeyboardShortcut?) {
+        voiceTriggerHotkey = shortcut
+        saveVoiceInputSettings()
+        Task { [weak self, adapter = actionPipeline] in
+            guard let adapter = adapter as? ProductionHostActionAdapter else { return }
+            await adapter.configureVoiceHotkey(shortcut)
         }
     }
 
@@ -1095,7 +1149,7 @@ final class AppModel: ObservableObject {
                             clip: true,
                             visible: tile.content.module == .pet
                         ),
-                        backgroundRGB888: 0x081018,
+                        backgroundRGB888: 0x000000,
                         fit: .contain,
                         manifest: manifest
                     )
@@ -1444,6 +1498,8 @@ final class AppModel: ObservableObject {
                     audioRecorder = nil
                     recordingSink = nil
                     recordingDestination = nil
+                    livePipeline?.stop()
+                    livePipeline = nil
                     audioState = .failed(.output("Device audio: \(error.code)"))
                 }
             }
@@ -1517,6 +1573,25 @@ final class AppModel: ObservableObject {
     }
 
     private func consumeAudio(_ frame: AudioFrame) {
+        // BlackHole path: decode Opus → PCM → virtual device for third-party apps.
+        // Runs independently of Ogg file recording; both can be active at once.
+        if voiceInputMode == .blackhole {
+            if frame.flags & 0x01 != 0 {
+                livePipeline = LiveAudioPipeline(deviceName: blackholeDeviceName)
+                do {
+                    try livePipeline?.start()
+                } catch {
+                    diagnosticMessage = "BlackHole pipeline start failed: \(error)"
+                    livePipeline = nil
+                }
+            }
+            livePipeline?.consume(opusPacket: frame.payload)
+            if frame.flags & 0x02 != 0 {
+                livePipeline?.stop()
+                livePipeline = nil
+            }
+        }
+
         if audioRecorder == nil {
             do {
                 if saveRecordings {
@@ -1575,6 +1650,8 @@ final class AppModel: ObservableObject {
         audioRecorder = nil
         recordingSink = nil
         recordingDestination = nil
+        livePipeline?.stop()
+        livePipeline = nil
         previewPixels = nil
         previewLayout = nil
         liveDashboardEnabled = false

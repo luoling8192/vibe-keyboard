@@ -335,7 +335,7 @@ struct AppModelTests {
         #expect(layout.widgets.first == .text(
             id: "left-content",
             target: "left-content-value",
-            fallback: "CODEX\nLIMIT 45%\nSTATE READY"
+            fallback: "CODEX\nREMAINING 55%\nSTATE READY"
         ))
         #expect(try ReplacementCommandEncoder.encode(.commit(commit)).count <= 4096)
 
@@ -376,7 +376,7 @@ struct AppModelTests {
         #expect(first.left == .init(
             module: .codex,
             title: "CODEX",
-            lines: ["LIMIT 45%", "STATE READY"]
+            lines: ["REMAINING 55%", "STATE READY"]
         ))
         #expect(first.right == .init(
             module: .system,

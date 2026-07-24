@@ -221,13 +221,13 @@ struct LiveDashboardSnapshot: Equatable, Sendable {
 
     private func usageLine(_ value: AgentUsageSnapshot) -> String {
         if let percent = value.usedPercent {
-            return "LIMIT \(percent)%"
+            return "REMAINING \(100 - percent)%"
         }
         return "STATE \(value.status.uppercased())"
     }
 
     private static func usage(_ value: AgentUsageSnapshot) -> String {
-        value.usedPercent.map { "\($0)%" } ?? value.status.uppercased()
+        value.usedPercent.map { "\(100 - $0)%" } ?? value.status.uppercased()
     }
 
     static func count(_ value: Int64?) -> String {
