@@ -26,3 +26,11 @@ firmware/sdkconfig.review-*
 # Editors
 .idea/
 .vscode/
+
+# .NET / Windows
+win/**/bin/
+win/**/obj/
+win/**/.vs/
+win/artifacts/
+*.user
+*.suo
