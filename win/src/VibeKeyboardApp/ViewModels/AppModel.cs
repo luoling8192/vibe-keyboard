@@ -4,11 +4,16 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.ObjectModel;
+using System.IO;
+using System.Diagnostics;
 using VibeBoardKit.Protocol;
 using VibeBoardKit.USB;
 using VibeBoardKit.Assets;
 using VibeBoardKit.LED;
 using VibeBoardKit.Input;
+using VibeBoardKit.Audio;
+using VibeBoardKit.VKA1;
+using VibeKeyboardApp.Input;
 
 namespace VibeKeyboardApp.ViewModels;
 
@@ -364,12 +369,17 @@ public sealed class AppModel : INotifyPropertyChanged, IDisposable
         switch (evt)
         {
             case USBSessionEvent.StateChanged sc:
-                if (sc.State == USBSessionState.Failed || sc.State == USBSessionState.Incompatible)
+                if (sc.State == USBSessionState.Ready)
+                {
+                    Connection = AppConnectionState.Ready;
+                }
+                else if (sc.State == USBSessionState.Failed || sc.State == USBSessionState.Incompatible)
                 {
                     Connection = sc.State == USBSessionState.Failed
                         ? AppConnectionState.Failed
                         : AppConnectionState.Incompatible;
                     DiagnosticMessage = sc.Error;
+                    ClearSessionPresentation();
                 }
                 break;
 
@@ -378,17 +388,193 @@ public sealed class AppModel : INotifyPropertyChanged, IDisposable
                 break;
 
             case USBSessionEvent.AudioFrame audio:
-                // Audio handling is done in the audio subsystem
+                ConsumeAudio(audio.Frame);
                 break;
 
             case USBSessionEvent.StateEvent state:
-                // Handle button events
-                if (state.Event.Event == "button" && state.Event.Button != null)
-                {
-                    // Route to key action router
-                }
+                ConsumeKeyEvent(state.Event);
                 break;
         }
+    }
+
+    private void ConsumeKeyEvent(StateEvent @event)
+    {
+        if (@event.Button == null) return;
+        CanonicalKey key;
+        try { key = CanonicalKeyExtensions.FromDeviceValue(@event.Button); }
+        catch { return; }
+
+        // Simple gesture routing: single click for now
+        if (@event.Event == "button_click")
+        {
+            RouteKeyAction(key, KeyGesture.Single);
+        }
+        else if (@event.Event == "button_down")
+        {
+            // Could implement long press detection
+        }
+        else if (@event.Event == "button_up")
+        {
+            if (@event.DurationMS.HasValue && @event.DurationMS.Value >= 500)
+            {
+                RouteKeyAction(key, KeyGesture.Long);
+            }
+        }
+    }
+
+    private void RouteKeyAction(CanonicalKey key, KeyGesture gesture)
+    {
+        if (!KeyProfile.Mappings.TryGetValue(key, out var bindings)) return;
+
+        var action = gesture switch
+        {
+            KeyGesture.Single => bindings.Single,
+            KeyGesture.Double => bindings.Double,
+            KeyGesture.Long => bindings.Long,
+            _ => new HostAction.None()
+        };
+
+        _ = Task.Run(() => ExecuteHostAction(action));
+    }
+
+    private async Task ExecuteHostAction(HostAction action)
+    {
+        switch (action)
+        {
+            case HostAction.None:
+                break;
+            case HostAction.VoiceInput:
+                // Toggle voice input - handled by UI state
+                break;
+            case HostAction.SendEnter:
+                KeyboardInjector.SendEnter();
+                break;
+            case HostAction.SystemCopy:
+                KeyboardInjector.CopySelection();
+                break;
+            case HostAction.InterruptControlC:
+                KeyboardInjector.InterruptControlC();
+                break;
+            case HostAction.WakeApplication:
+                // Wake the application window
+                break;
+            case HostAction.PasteText pt:
+                KeyboardInjector.PasteFromClipboard(pt.Text);
+                break;
+            case HostAction.CustomShortcut cs:
+                // Build modifier string: ^ = ctrl, + = shift, % = alt
+                var modStr = "";
+                foreach (var mod in cs.Shortcut.Modifiers)
+                    modStr += mod switch
+                    {
+                        "control" => "^",
+                        "shift" => "+",
+                        "option" => "%",
+                        _ => ""
+                    };
+                KeyboardInjector.SendShortcut(modStr, cs.Shortcut.Key);
+                break;
+            case HostAction.CustomCommand cc:
+                try
+                {
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = cc.Command.Executable,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                    };
+                    foreach (var arg in cc.Command.Arguments)
+                        psi.ArgumentList.Add(arg);
+                    using var proc = Process.Start(psi);
+                    if (proc != null)
+                    {
+                        var cts = new CancellationTokenSource((int)cc.Command.TimeoutMilliseconds);
+                        cts.Token.Register(() => { try { proc.Kill(); } catch { } });
+                        await proc.WaitForExitAsync(cts.Token);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticMessage = $"Command failed: {ex.Message}";
+                }
+                break;
+            case HostAction.LaunchApplication la:
+                try { Process.Start(new ProcessStartInfo(la.BundleIdentifier) { UseShellExecute = true }); }
+                catch (Exception ex) { DiagnosticMessage = $"Launch failed: {ex.Message}"; }
+                break;
+            case HostAction.ScreenModeAction sm:
+                ScreenMode = sm.Mode;
+                break;
+        }
+    }
+
+    private AudioRecordingSession? _audioRecorder;
+    private DataOggPageSink? _recordingSink;
+    private string? _recordingDestination;
+
+    private void ConsumeAudio(AudioFrame frame)
+    {
+        if (_audioRecorder == null)
+        {
+            try
+            {
+                if (SaveRecordings)
+                {
+                    var dir = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                        "VibeKeyboard", "Recordings");
+                    Directory.CreateDirectory(dir);
+                    var path = Path.Combine(dir, $"recording_{frame.Session}_{DateTime.Now:yyyyMMdd_HHmmss}.ogg");
+                    _recordingDestination = path;
+                    _audioRecorder = new AudioRecordingSession(new AtomicFileOggPageSink(path));
+                }
+                else
+                {
+                    _recordingSink = new DataOggPageSink();
+                    _audioRecorder = new AudioRecordingSession(_recordingSink);
+                }
+            }
+            catch (Exception ex)
+            {
+                DiagnosticMessage = $"Recording setup failed: {ex.Message}";
+                return;
+            }
+        }
+
+        try
+        {
+            _audioRecorder.Consume(frame);
+            if (_audioRecorder.State.Kind == AudioRecordingStateKind.Completed)
+            {
+                if (_recordingDestination != null)
+                    LastRecording = _recordingDestination;
+                else if (_recordingSink != null)
+                    LastRecording = $"Session {frame.Session}, {_recordingSink.Data?.Length ?? 0} Ogg bytes (not saved)";
+                _audioRecorder = null;
+                _recordingSink = null;
+                _recordingDestination = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticMessage = $"Audio recording failed: {ex.Message}";
+            _audioRecorder = null;
+            _recordingSink = null;
+            _recordingDestination = null;
+        }
+    }
+
+    private void ClearSessionPresentation()
+    {
+        _audioRecorder?.Cancel();
+        _audioRecorder = null;
+        _recordingSink = null;
+        _recordingDestination = null;
+        AssetsCapability = CapabilityPresentation.Absent;
+        ScreenCapability = CapabilityPresentation.Absent;
+        LEDCapability = CapabilityPresentation.Absent;
+        UpdateCapability = CapabilityPresentation.Absent;
     }
 
     private void UpdateCapabilities(ReplacementSessionContext context)
@@ -435,6 +621,125 @@ public sealed class AppModel : INotifyPropertyChanged, IDisposable
             Disconnect();
             Attach(_session.Descriptor);
         }
+    }
+
+    /// <summary>
+    /// Import and upload an image or animation asset.
+    /// </summary>
+    public async void ImportAndUpload(string filePath, bool pet = false)
+    {
+        if (_assetTransfer == null || _session == null)
+        {
+            DiagnosticMessage = "Asset upload: device not connected";
+            return;
+        }
+
+        try
+        {
+            Upload = UploadPresentation.Validating;
+            var data = File.ReadAllBytes(filePath);
+            var decoded = AssetSourceDecoder.Decode(data);
+
+            Upload = UploadPresentation.Converting;
+            var context = _session.CurrentReplacementContext;
+            if (context == null || context.Snapshot.Assets is not FeatureAvailability<AssetsCapability>.Available assets)
+            {
+                Upload = UploadPresentation.Failed;
+                DiagnosticMessage = "Asset capability not available";
+                return;
+            }
+
+            var limits = new VKA1Limits(
+                assets.Capability.MaxFrames,
+                assets.Capability.MinFrameMS,
+                assets.Capability.MaxFrameMS,
+                assets.Capability.MaxAssetBytes,
+                assets.Capability.MaxActiveDecodedBytes);
+
+            var container = ConvertedAssetFactory.MakeVKA1(
+                decoded, "contain", new AssetRGB888(0, 0, 0),
+                pet ? 119 : 428, pet ? 129 : 142, limits);
+
+            var prepared = new PreparedAsset(container, limits);
+            if (pet && prepared.Kind != AssetKind.Animation)
+            {
+                Upload = UploadPresentation.Failed;
+                DiagnosticMessage = "Pet must be an animation";
+                return;
+            }
+
+            Upload = UploadPresentation.Sending;
+            var transferID = (uint)Random.Shared.Next(1, int.MaxValue);
+            var result = await _assetTransfer.Upload(prepared, transferID);
+            UploadProgress = result.Fraction;
+            Upload = UploadPresentation.Active;
+        }
+        catch (Exception ex)
+        {
+            Upload = UploadPresentation.Failed;
+            DiagnosticMessage = $"Upload failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Cancel an in-progress upload.
+    /// </summary>
+    public async void CancelUpload()
+    {
+        if (_assetTransfer == null || _session == null) return;
+        Upload = UploadPresentation.Cancelled;
+    }
+
+    /// <summary>
+    /// Query device screen state.
+    /// </summary>
+    public async void QueryScreen()
+    {
+        if (_screenConfig == null) return;
+        try { await _screenConfig.Query(); }
+        catch (Exception ex) { DiagnosticMessage = $"Screen query failed: {ex.Message}"; }
+    }
+
+    /// <summary>
+    /// Save key mappings to disk and configure device input.
+    /// </summary>
+    public async void SaveMappings()
+    {
+        try
+        {
+            _keyMappingRepository.Save(KeyProfile);
+            if (_session != null)
+            {
+                var voiceKey = GetDeviceVoiceKey(KeyProfile);
+                await _session.Send(new ControlCommand.InteractionModeCmd(InteractionMode));
+                await _session.Send(new ControlCommand.VoiceKeyCmd(voiceKey));
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticMessage = $"Save failed: {ex.Message}";
+        }
+    }
+
+    private static VoiceKey GetDeviceVoiceKey(KeyMappingProfile profile)
+    {
+        foreach (var (key, bindings) in profile.Mappings)
+        {
+            if (bindings.Single is HostAction.VoiceInput ||
+                bindings.Double is HostAction.VoiceInput ||
+                bindings.Long is HostAction.VoiceInput)
+            {
+                return key switch
+                {
+                    CanonicalKey.K1 => VoiceKey.K1,
+                    CanonicalKey.K2 => VoiceKey.K2,
+                    CanonicalKey.K3 => VoiceKey.K3,
+                    CanonicalKey.K4 => VoiceKey.K4,
+                    _ => VoiceKey.None
+                };
+            }
+        }
+        return VoiceKey.None;
     }
 
     public void Disconnect()
