@@ -2,6 +2,7 @@
 
 #ifdef ESP_PLATFORM
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -71,9 +72,99 @@ static lv_obj_t *create_object(lv_obj_t *parent, const vk_screen_object_t *objec
 {
     if (object->type == VK_SCREEN_OBJECT_STATIC_LABEL || object->type == VK_SCREEN_OBJECT_GLYPH_LABEL ||
         object->type == VK_SCREEN_OBJECT_DYNAMIC_LABEL || object->type == VK_SCREEN_OBJECT_ICON_TEXT) return lv_label_create(parent);
-    if (object->type == VK_SCREEN_OBJECT_PROGRESS) return lv_bar_create(parent);
+    if (object->type == VK_SCREEN_OBJECT_PROGRESS) return lv_arc_create(parent);
     if (object->type == VK_SCREEN_OBJECT_IMAGE || object->type == VK_SCREEN_OBJECT_PET) return lv_image_create(parent);
     return lv_obj_create(parent);
+}
+
+static uint32_t gauge_color(int32_t value)
+{
+    static const uint32_t colors[] = {
+        0x32D74B, 0x73C944, 0xA8C83A, 0xD7B83B,
+        0xF39A3D, 0xFF6B3D, 0xFF453A,
+    };
+    if (value < 0) value = 0;
+    if (value > 100) value = 100;
+    size_t index = (size_t)value / 15U;
+    if (index >= sizeof(colors) / sizeof(colors[0])) {
+        index = sizeof(colors) / sizeof(colors[0]) - 1U;
+    }
+    return colors[index];
+}
+
+static void set_progress_value(lv_obj_t *item, int32_t value)
+{
+    if (value < 0) value = 0;
+    if (value > 100) value = 100;
+    lv_arc_set_value(item, value);
+    lv_obj_set_style_arc_color(
+        item, lv_color_hex(gauge_color(value)), LV_PART_INDICATOR);
+    lv_obj_t *label = lv_obj_get_child(item, 0);
+    if (label != NULL) {
+        char text[8];
+        snprintf(text, sizeof(text), "%ld%%", (long)value);
+        lv_label_set_text(label, text);
+    }
+}
+
+static void configure_progress(
+    lv_obj_t *item,
+    const vk_screen_object_t *object,
+    lv_font_t *font,
+    int32_t value
+)
+{
+    lv_arc_set_range(item, 0, 100);
+    lv_arc_set_bg_angles(item, 0, 360);
+    lv_arc_set_rotation(item, 270);
+    lv_obj_remove_style(item, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(item, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_color(
+        item, lv_color_hex(object->background_rgb888), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(item, 8, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(item, 8, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(item, true, LV_PART_MAIN);
+    lv_obj_set_style_arc_rounded(item, true, LV_PART_INDICATOR);
+
+    lv_obj_t *label = lv_label_create(item);
+    lv_obj_set_size(label, LV_PCT(100), 22);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    if (font != NULL) lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_center(label);
+    set_progress_value(item, value);
+}
+
+static void set_paired_pet_visibility(
+    vk_lvgl_root_t *root,
+    const char *object_id,
+    bool visible
+)
+{
+    static const char suffix[] = "-content-value";
+    size_t id_length = strlen(object_id);
+    size_t suffix_length = sizeof(suffix) - 1U;
+    if (id_length <= suffix_length ||
+        strcmp(object_id + id_length - suffix_length, suffix) != 0) {
+        return;
+    }
+    char pet_id[VK_SCREEN_MAX_ID_BYTES + 1U];
+    int written = snprintf(
+        pet_id, sizeof(pet_id), "%.*s-pet-view",
+        (int)(id_length - suffix_length), object_id);
+    if (written <= 0 || (size_t)written >= sizeof(pet_id)) return;
+    for (uint16_t index = 0U; index < root->count; ++index) {
+        if (root->objects[index] == NULL ||
+            strcmp(root->object_ids[index], pet_id) != 0) {
+            continue;
+        }
+        if (visible) {
+            lv_obj_remove_flag(root->objects[index], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(root->objects[index], LV_OBJ_FLAG_HIDDEN);
+        }
+        return;
+    }
 }
 
 static esp_err_t adapter_create(void *context, const vk_screen_model_t *model, void **root)
@@ -133,11 +224,17 @@ static esp_err_t adapter_create(void *context, const vk_screen_model_t *model, v
             lv_label_set_text(item, initial_label_text(model, object, formatted));
             lv_obj_set_style_text_color(item, lv_color_hex(object->color_rgb888), 0);
             lv_obj_set_style_text_align(item, object->align == 1U ? LV_TEXT_ALIGN_CENTER : object->align == 2U ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT, 0);
+            lv_obj_set_style_text_line_space(item, 10, 0);
             lv_label_set_long_mode(item, LV_LABEL_LONG_CLIP);
             if (has_font) lv_obj_set_style_text_font(item, s_context.font, 0);
         } else if (object->type == VK_SCREEN_OBJECT_PROGRESS) {
-            lv_bar_set_range(item, 0, 1000);
-            lv_bar_set_value(item, 0, LV_ANIM_OFF);
+            char formatted[VK_SCREEN_MAX_TEXT_BYTES + 1U];
+            const char *initial = initial_label_text(model, object, formatted);
+            char *end = NULL;
+            long value = strtol(initial, &end, 10);
+            configure_progress(
+                item, object, s_context.font,
+                end == initial || *end != 0 ? 0 : (int32_t)value);
         }
         if (object->type == VK_SCREEN_OBJECT_IMAGE || object->type == VK_SCREEN_OBJECT_PET) {
             vk_lvgl_context_t *adapter = context; vk_screen_asset_info_t info = {0};
@@ -171,25 +268,13 @@ static esp_err_t adapter_create(void *context, const vk_screen_model_t *model, v
             owner->descriptor.data_size = info.decoded_bytes_per_frame;
             owner->descriptor.data = (const uint8_t *)owner->pixels;
             lv_image_set_src(item, &owner->descriptor);
-            /* Apply image fit: 0=contain 1=cover 2=stretch 3=center.
-             * Zoom uses fixed-point 256 == 100 %.  Scale factors are clipped
-             * to the object rect to keep the image within bounds on overflow. */
-            if (object->fit == 3U) {
-                lv_obj_set_size(item, info.width, info.height);
-                lv_obj_align_to(item, parent, LV_ALIGN_CENTER,
-                    x + (int32_t)object->rect.width / 2 - (int32_t)info.width / 2,
-                    y + (int32_t)object->rect.height / 2 - (int32_t)info.height / 2);
-            } else if (object->fit == 0U || object->fit == 1U) {
-                if (info.width > 0U && info.height > 0U) {
-                    uint16_t sx = (uint16_t)((uint32_t)object->rect.width * 256U / info.width);
-                    uint16_t sy = (uint16_t)((uint32_t)object->rect.height * 256U / info.height);
-                    uint16_t zoom = (object->fit == 0U) ? (sx < sy ? sx : sy) : (sx > sy ? sx : sy);
-                    lv_image_set_scale_x(item, zoom);
-                    lv_image_set_scale_y(item, zoom);
-                }
-                lv_obj_center(item);
-            }
-            /* stretch (fit==2) is the default — bounds already applied above. */
+            static const lv_image_align_t fit[] = {
+                LV_IMAGE_ALIGN_CONTAIN,
+                LV_IMAGE_ALIGN_COVER,
+                LV_IMAGE_ALIGN_STRETCH,
+                LV_IMAGE_ALIGN_CENTER,
+            };
+            lv_image_set_inner_align(item, fit[object->fit]);
         }
     }
     *root = candidate; return ESP_OK;
@@ -199,13 +284,28 @@ static esp_err_t adapter_widget(void *context, void *root, const char *object_id
                                 const char *value, uint32_t sequence,
                                 vk_screen_widget_state_t state)
 {
-    (void)context;(void)sequence;(void)state;
+    (void)context;(void)sequence;
     vk_lvgl_root_t *candidate = root; if (candidate == NULL || object_id == NULL || value == NULL) return ESP_ERR_INVALID_ARG;
     for (uint16_t index = 0U; index < candidate->count; ++index) {
         lv_obj_t *item = candidate->objects[index]; if (item == NULL) continue;
         if (strcmp(candidate->object_ids[index], object_id) == 0) {
-            if (lv_obj_check_type(item, &lv_bar_class)) { char *end = NULL; long number = strtol(value, &end, 10); if (end == value || *end != 0) return ESP_ERR_INVALID_ARG; lv_bar_set_value(item, (int32_t)number, LV_ANIM_OFF); }
-            else lv_label_set_text(item, value);
+            set_paired_pet_visibility(
+                candidate, object_id, state == VK_SCREEN_WIDGET_STALE);
+            if (state != VK_SCREEN_WIDGET_FRESH) {
+                lv_obj_add_flag(item, LV_OBJ_FLAG_HIDDEN);
+                return ESP_OK;
+            }
+            lv_obj_remove_flag(item, LV_OBJ_FLAG_HIDDEN);
+            if (lv_obj_check_type(item, &lv_arc_class)) {
+                char *end = NULL;
+                long number = strtol(value, &end, 10);
+                if (end == value || *end != 0 || number < 0 || number > 100) {
+                    return ESP_ERR_INVALID_ARG;
+                }
+                set_progress_value(item, (int32_t)number);
+            } else {
+                lv_label_set_text(item, value);
+            }
             return ESP_OK;
         }
     }

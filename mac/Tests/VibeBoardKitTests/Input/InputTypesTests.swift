@@ -52,7 +52,8 @@ struct InputTypesTests {
             .customShortcut(try KeyboardShortcut(modifiers: [.command, .function, .shift], key: "K")),
             .customCommand(try CommandSpecification(executable: "/usr/bin/true", timeoutMilliseconds: 1000)),
             .launchApplication(bundleIdentifier: "com.apple.TextEdit"),
-            .screenMode(.pet), .petInteraction("wave"),
+            .screenMode(.pet), .dashboardNextPage, .dashboardNextStocks,
+            .petInteraction("wave"),
         ]
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()

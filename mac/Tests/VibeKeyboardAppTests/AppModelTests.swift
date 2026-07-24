@@ -333,9 +333,9 @@ struct AppModelTests {
         #expect(layout.widgets.count == 6)
         #expect(layout.objects.count == 6)
         #expect(layout.widgets.first == .text(
-            id: "left-title",
-            target: "left-title-value",
-            fallback: "A1 CODEX"
+            id: "left-content",
+            target: "left-content-value",
+            fallback: "CODEX\nLIMIT 45%\nSTATE READY"
         ))
         #expect(try ReplacementCommandEncoder.encode(.commit(commit)).count <= 4096)
 
@@ -349,8 +349,8 @@ struct AppModelTests {
         await eventually { await session.widgetCount() >= 6 }
         let widgets = await session.allWidgets()
         #expect(Array(widgets.prefix(6).map(\.widgetID)) == [
-            "left-title", "left-line1", "left-line2",
-            "right-title", "right-line1", "right-line2",
+            "left-content", "left-cpu", "left-memory",
+            "right-content", "right-cpu", "right-memory",
         ])
         #expect(widgets.prefix(6).allSatisfy { $0.revision == 1 })
     }
@@ -374,27 +374,55 @@ struct AppModelTests {
 
         let first = snapshot.page(modules: modules, pageIndex: 0, stockOffset: 0)
         #expect(first.left == .init(
-            title: "A1 CODEX",
-            line1: "LIMIT 45%",
-            line2: "TODAY 1.2M"
+            module: .codex,
+            title: "CODEX",
+            lines: ["LIMIT 45%", "STATE READY"]
         ))
         #expect(first.right == .init(
-            title: "A2 SYSTEM",
-            line1: "CPU 23%",
-            line2: "MEM 67%"
+            module: .system,
+            title: "SYSTEM",
+            lines: ["CPU 23%", "MEMORY 67%"]
         ))
 
         let second = snapshot.page(modules: modules, pageIndex: 1, stockOffset: 2)
         #expect(second.left == .init(
-            title: "B1 STOCKS 3-1/3",
-            line1: "00700 601.50 -0.18%",
-            line2: "000001 3876.8 +0.25%"
+            module: .stocks,
+            title: "STOCKS",
+            lines: [
+                "00700 601.50 -0.18%",
+                "000001 3876.8 +0.25%",
+                "AAPL 220.12 +0.57%",
+            ]
         ))
         #expect(second.right == .init(
-            title: "B2 NETWORK",
-            line1: "DOWN 1.5M/s",
-            line2: "UP 42K/s"
+            module: .network,
+            title: "NETWORK",
+            lines: ["DOWN 1.5M/s", "UP 42K/s", "LINK ACTIVE"]
         ))
+    }
+
+    @Test func dashboardPagesAreDynamicAndSelectorsStayIndependent() {
+        let model = AppModel(
+            monitor: TestMonitor(),
+            sessionFactory: TestSessionFactory(
+                session: TestSession(descriptor: testDescriptor())
+            ),
+            mappingRepository: KeyMappingRepository(
+                store: MemoryConfigurationStore()
+            )
+        )
+
+        model.setDashboardModule(.network, at: 0)
+        #expect(model.dashboardModules == [.network, .claude, .system, .stocks])
+
+        model.addDashboardPage()
+        #expect(model.dashboardModules.count == 6)
+        model.setDashboardModule(.codex, at: 4)
+        #expect(model.dashboardModules[0] == .network)
+        #expect(model.dashboardModules[4] == .codex)
+
+        model.removeDashboardPage(at: 1)
+        #expect(model.dashboardModules == [.network, .claude, .codex, .stocks])
     }
 
     @Test func stockInputIsBoundedAndASCIIQuoteParsingPreservesOrder() {

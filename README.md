@@ -61,9 +61,11 @@ time.
 
 1. Open `Screen` and choose `Dashboard`.
 2. Select the modules for Page A left/right and Page B left/right.
-3. Choose a page interval from 4 to 12 seconds.
-4. Add stock symbols such as `sh000001`, `hk00700`, or `usAAPL`.
-5. Click `Save`, then `Install & start`.
+3. If a slot uses `Pet`, choose or import an animation under `Dashboard Pet`,
+   then upload it. The pet stays on that side across both pages.
+4. Choose a page interval from 4 to 12 seconds.
+5. Add stock symbols such as `sh000001`, `hk00700`, or `usAAPL`.
+6. Click `Save`, then `Install & start`.
 
 The display shows two tiles at once:
 
@@ -86,12 +88,13 @@ Page B
 Page A and Page B rotate automatically. Stock tiles show two quotes and advance
 through the configured symbols. Keep the Mac app running for live updates.
 
-## Upload Images and Pets
+## Upload Images and Dashboard Pets
 
 - `Screen > Import & Upload…` converts an image to the device format and
   uploads it. Select `Image`, then click `Commit uploaded image`.
-- `Pets` loads local pets and the public Petdex catalog. Select a pet, upload
-  it, then click `Commit to display`.
+- `Screen > Dashboard > Dashboard Pet` loads local pets and the public Petdex
+  catalog. Select or import a pet, upload it, assign `Pet` to a dashboard side,
+  then click `Install & start`.
 
 ## Configure Keys
 

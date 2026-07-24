@@ -45,11 +45,12 @@ the six text widgets when the selected 4–12 second page interval elapses. A
 stock tile renders two quotes at once and advances through up to 12 configured
 symbols every four seconds.
 
-Available modules are Codex usage, Claude usage, CPU/memory, network throughput,
-stocks, and an empty slot. The app must remain open for live sampling and widget
-updates. Codex values come from the installed Codex `app-server`; Claude daily
-tokens come from local session logs. Credentials are never copied to the
-device.
+Available modules are Pet, Codex usage, Claude usage, CPU/memory, network
+throughput, stocks, and an empty slot. A selected pet is uploaded from the
+Dashboard inspector and remains on the same physical side across both pages.
+The app must remain open for live sampling and widget updates. Codex values
+come from the installed Codex `app-server`; Claude daily tokens come from local
+session logs. Credentials are never copied to the device.
 
 Custom commands execute the selected absolute executable directly. They do not
 run through a shell, and every line in the argument field is passed as one

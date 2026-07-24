@@ -21,6 +21,8 @@ struct KeyActionRouterTests {
             (.customCommand(command), .command(command), .command(CommandResult(exitStatus: 7))),
             (.launchApplication(bundleIdentifier: "com.example.App"), .launch("com.example.App"), .completed),
             (.screenMode(.dashboard), .screen(.dashboard), .completed),
+            (.dashboardNextPage, .dashboardPage, .completed),
+            (.dashboardNextStocks, .dashboardStocks, .completed),
             (.petInteraction("wave"), .pet("wave"), .completed),
         ]
 
@@ -157,6 +159,8 @@ private enum ServiceEvent: Equatable, Sendable {
     case command(CommandSpecification)
     case launch(String)
     case screen(ScreenMode)
+    case dashboardPage
+    case dashboardStocks
     case pet(String)
 }
 
@@ -182,6 +186,8 @@ private actor Services: PermissionAuthorizing, InputInjecting, ApplicationContro
     func launchApplication(bundleIdentifier: String) { events.append(.launch(bundleIdentifier)) }
     func toggleVoiceInput() { events.append(.voice) }
     func activate(mode: ScreenMode) { events.append(.screen(mode)) }
+    func advanceDashboardPage() { events.append(.dashboardPage) }
+    func advanceDashboardStocks() { events.append(.dashboardStocks) }
     func interactWithPet(_ interaction: String) { events.append(.pet(interaction)) }
     func execute(_ command: CommandSpecification) -> CommandResult {
         events.append(.command(command))

@@ -27,6 +27,7 @@ public struct PreparedAsset: Equatable, Sendable {
 }
 
 public protocol AssetTransferSession: Sendable {
+    func refreshLease(timeout: Duration) async throws
     func sendAssetCommand(_ command: AssetCommand, timeout: Duration) async throws
     func sendAssetChunk(_ payload: Data, using authorization: ActiveAssetTransfer, timeout: Duration) async throws
     func currentActiveAssetTransfer() async -> ActiveAssetTransfer?
@@ -35,7 +36,15 @@ public protocol AssetTransferSession: Sendable {
     func currentReplacementContext() async -> ReplacementSessionContext?
 }
 
-extension USBSession: AssetTransferSession {}
+public extension AssetTransferSession {
+    func refreshLease(timeout: Duration) async throws {}
+}
+
+extension USBSession: AssetTransferSession {
+    public func refreshLease(timeout: Duration) async throws {
+        try await send(.ping, timeout: timeout)
+    }
+}
 
 public actor AssetTransferService {
     public struct Progress: Equatable, Sendable {
@@ -64,8 +73,14 @@ public actor AssetTransferService {
         }
         try await session.sendAssetCommand(.begin(transferID: transferID, sha256: asset.sha256, totalBytes: totalBytes, kind: asset.kind), timeout: .seconds(2))
         var authorization = try await awaitAuthorization(transferID: transferID, expectedSHA: asset.sha256, totalBytes: totalBytes, kind: asset.kind)
+        let clock = ContinuousClock()
+        var nextLeaseRefresh = clock.now.advanced(by: .seconds(1))
         while authorization.nextOffset < totalBytes {
             try Task.checkCancellation()
+            if clock.now >= nextLeaseRefresh {
+                try await session.refreshLease(timeout: .seconds(2))
+                nextLeaseRefresh = clock.now.advanced(by: .seconds(1))
+            }
             let offset = Int(authorization.nextOffset)
             let length = min(Int(authorization.chunkBytes), asset.data.count - offset)
             guard length > 0 else { throw AssetServiceError.transferInvalidated }
@@ -81,7 +96,13 @@ public actor AssetTransferService {
         guard transferID != 0, let totalBytes = UInt32(exactly: asset.data.count), totalBytes > 0 else { throw AssetServiceError.invalidAsset }
         try await session.sendAssetCommand(.query(transferID: transferID), timeout: .seconds(2))
         var authorization = try await awaitAuthorization(transferID: transferID, expectedSHA: asset.sha256, totalBytes: totalBytes, kind: asset.kind)
+        let clock = ContinuousClock()
+        var nextLeaseRefresh = clock.now.advanced(by: .seconds(1))
         while authorization.nextOffset < totalBytes {
+            if clock.now >= nextLeaseRefresh {
+                try await session.refreshLease(timeout: .seconds(2))
+                nextLeaseRefresh = clock.now.advanced(by: .seconds(1))
+            }
             let offset = Int(authorization.nextOffset)
             let length = min(Int(authorization.chunkBytes), asset.data.count - offset)
             try await session.sendAssetChunk(asset.data.subdata(in: offset..<(offset + length)), using: authorization, timeout: .seconds(2))

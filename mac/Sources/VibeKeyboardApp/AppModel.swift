@@ -109,7 +109,6 @@ struct ProductionDeviceSessionFactory: AppDeviceSessionFactory {
 enum AppPage: String, CaseIterable, Identifiable {
     case device = "Device"
     case screen = "Screen"
-    case pets = "Pets"
     case keys = "Keys"
     case audio = "Audio"
     case firmware = "Firmware"
@@ -119,7 +118,6 @@ enum AppPage: String, CaseIterable, Identifiable {
         switch self {
         case .device: "keyboard"
         case .screen: "rectangle.on.rectangle"
-        case .pets: "pawprint"
         case .keys: "command"
         case .audio: "waveform"
         case .firmware: "cpu"
@@ -255,9 +253,15 @@ final class AppModel: ObservableObject {
         .codex, .claude, .system, .stocks,
     ]
     @Published var dashboardPageDurationSeconds = 6
+    @Published private(set) var dashboardPageIndex = 0
     @Published var petSearch: String = ""
     @Published var selectedPetID: String?
     @Published var petAnimationChoice: PetAnimationChoice = .idle
+    @Published private(set) var petPreviewFrames: [CGImage] = []
+    @Published private(set) var petPreviewFrameDurationsMS: [Int] = []
+    @Published private(set) var petPreviewLoading = false
+    @Published private(set) var petPreviewFailed = false
+    @Published private(set) var petPreviewItemID: String?
 
     private let monitor: any USBDeviceMonitoring
     private let sessionFactory: any AppDeviceSessionFactory
@@ -272,6 +276,7 @@ final class AppModel: ObservableObject {
     private var operationTask: Task<Void, Never>?
     private var dashboardTask: Task<Void, Never>?
     private var petCatalogTask: Task<Void, Never>?
+    private var petPreviewTask: Task<Void, Never>?
     private var session: (any AppDeviceSession)?
     private var audioRecorder: AudioRecordingSession?
     private var recordingSink: DataOggPageSink?
@@ -280,7 +285,10 @@ final class AppModel: ObservableObject {
     private var pendingScreenCommit: (epochGeneration: UInt64, snapshotGeneration: UInt64, previousRevision: UInt32, revision: UInt32, mode: ScreenMode)?
     private var widgetSequence: UInt32 = 0
     private var pendingLiveDashboardCommit = false
-    private var dashboardTick: UInt64 = 0
+    private var dashboardRotationElapsedSeconds = 0
+    private var dashboardStockElapsedSeconds = 0
+    private var dashboardStockOffset = 0
+    private var activeDashboardPetAsset: UploadedAssetSummary?
 
     init(
         monitor: any USBDeviceMonitoring,
@@ -317,14 +325,22 @@ final class AppModel: ObservableObject {
             dashboardProvider: ProductionLiveDashboardProvider(),
             petCatalog: ProductionPetCatalog()
         )
-        stockSymbols = UserDefaults.standard.string(forKey: "dashboard.stockSymbols") ?? "sh000001"
-        let storedModules = (0..<4).compactMap {
-            UserDefaults.standard.string(forKey: "dashboard.module.\($0)")
-        }.compactMap(DashboardModule.init(rawValue:))
-        if storedModules.count == 4 {
-            dashboardModules = storedModules
+        let defaults = UserDefaults.standard
+        stockSymbols = defaults.string(forKey: "dashboard.stockSymbols") ?? "sh000001"
+        if let stored = defaults.string(forKey: "dashboard.modules") {
+            let modules = stored.split(separator: ",")
+                .compactMap { DashboardModule(rawValue: String($0)) }
+            dashboardModules = Self.normalizedDashboardModules(modules)
+        } else {
+            let fallback: [DashboardModule] = [.codex, .claude, .system, .stocks]
+            let legacy = (0..<4).map {
+                defaults.string(forKey: "dashboard.module.\($0)") ?? fallback[$0].rawValue
+            }
+            dashboardModules = legacy.enumerated().map {
+                DashboardModule(rawValue: $0.element) ?? fallback[$0.offset]
+            }
         }
-        let storedDuration = UserDefaults.standard.integer(
+        let storedDuration = defaults.integer(
             forKey: "dashboard.pageDurationSeconds"
         )
         if [4, 6, 8, 10, 12].contains(storedDuration) {
@@ -332,9 +348,13 @@ final class AppModel: ObservableObject {
         }
         Task { [weak self, adapter] in
             await adapter.setScreenHandler { [weak self] mode in
-                self?.screenMode = mode
-                self?.selectedPage = mode == .pet ? .pets : .screen
+                self?.screenMode = mode == .image ? .image : .dashboard
+                self?.selectedPage = .screen
             }
+            await adapter.setDashboardHandlers(
+                nextPage: { [weak self] in self?.nextDashboardPage() },
+                nextStocks: { [weak self] in self?.nextDashboardStockPage() }
+            )
         }
     }
 
@@ -424,6 +444,8 @@ final class AppModel: ObservableObject {
                     source: decoded,
                     fit: .contain,
                     background: AssetRGB888(red: 0, green: 0, blue: 0),
+                    width: pet ? 119 : 428,
+                    height: pet ? 129 : 142,
                     limits: limits
                 )
                 let prepared = try PreparedAsset(data: container, limits: limits)
@@ -440,7 +462,7 @@ final class AppModel: ObservableObject {
                 self.uploadedPetID = nil
                 self.previewPixels = try VKA1Codec.decode(container, limits: limits).frames.first?.pixels
                 self.previewLayout = nil
-                self.screenMode = pet ? .pet : .image
+                self.screenMode = pet ? .dashboard : .image
                 self.upload = .active(prepared.sha256)
             } catch is CancellationError {
                 await self.abortActiveUpload(using: session)
@@ -499,23 +521,6 @@ final class AppModel: ObservableObject {
                 self?.diagnosticMessage = "Screen commit failed: \(error)"
             }
         }
-    }
-
-    func activateUploadedPet() {
-        pendingLiveDashboardCommit = false
-        guard let asset = lastUploadedAsset, asset.kind == .animation else {
-            diagnosticMessage = "A bounded animation must be uploaded first"
-            return
-        }
-        let manifest = ScreenPetManifest(id: "primary-pet", states: [
-            .idle: .asset(sha256: asset.sha256),
-            .active: .idleFallback,
-            .recording: .idleFallback,
-            .thinking: .idleFallback,
-            .success: .idleFallback,
-            .error: .idleFallback,
-        ])
-        commit(payload: .pet(manifest), assets: [ScreenAssetReference(bytes: asset.totalBytes, kind: asset.kind, sha256: asset.sha256)])
     }
 
     func activateLayout(mode: ScreenLayout.Mode) {
@@ -584,23 +589,42 @@ final class AppModel: ObservableObject {
             diagnosticMessage = "A current screen capability and reviewed font are required"
             return
         }
+        dashboardModules = Self.normalizedDashboardModules(dashboardModules)
+        let petAsset: UploadedAssetSummary?
+        if dashboardModules.contains(.pet) {
+            guard let asset = lastUploadedAsset, asset.kind == .animation else {
+                diagnosticMessage = "Upload a pet before installing this dashboard"
+                return
+            }
+            petAsset = asset
+        } else {
+            petAsset = nil
+        }
         let revision = previousRevision &+ 1
         guard revision != 0 else {
             diagnosticMessage = "Revision wrapped to zero"
             return
         }
         let fontReference = ScreenFontReference(id: font.id, version: font.version)
-        dashboardTick = 0
+        dashboardPageIndex = 0
+        dashboardStockOffset = 0
+        dashboardRotationElapsedSeconds = 0
+        dashboardStockElapsedSeconds = 0
         let layout = makeLiveDashboardLayout(
             font: fontReference,
             revision: revision,
-            page: dashboardPageContent(snapshot: dashboardSnapshot, tick: 0)
+            page: dashboardPageContent(snapshot: dashboardSnapshot),
+            petAsset: petAsset
         )
         previewLayout = layout
         previewPixels = nil
         screenMode = .dashboard
+        activeDashboardPetAsset = petAsset
         pendingLiveDashboardCommit = true
-        commit(payload: .dashboard(layout), assets: [])
+        let assets = petAsset.map {
+            [ScreenAssetReference(bytes: $0.totalBytes, kind: $0.kind, sha256: $0.sha256)]
+        } ?? []
+        commit(payload: .dashboard(layout), assets: assets)
     }
 
     func stopLiveDashboard() {
@@ -616,13 +640,11 @@ final class AppModel: ObservableObject {
         }
         stockSymbols = normalized.joined(separator: ",")
         UserDefaults.standard.set(stockSymbols, forKey: "dashboard.stockSymbols")
-        dashboardModules = LiveDashboardSnapshot.normalizedModules(dashboardModules)
-        for (index, module) in dashboardModules.enumerated() {
-            UserDefaults.standard.set(
-                module.rawValue,
-                forKey: "dashboard.module.\(index)"
-            )
-        }
+        dashboardModules = Self.normalizedDashboardModules(dashboardModules)
+        UserDefaults.standard.set(
+            dashboardModules.map(\.rawValue).joined(separator: ","),
+            forKey: "dashboard.modules"
+        )
         UserDefaults.standard.set(
             dashboardPageDurationSeconds,
             forKey: "dashboard.pageDurationSeconds"
@@ -630,25 +652,51 @@ final class AppModel: ObservableObject {
     }
 
     func setDashboardModule(_ module: DashboardModule, at index: Int) {
-        guard (0..<4).contains(index) else { return }
-        dashboardModules = LiveDashboardSnapshot.normalizedModules(dashboardModules)
-        dashboardModules[index] = module
+        guard dashboardModules.indices.contains(index) else { return }
+        var modules = Self.normalizedDashboardModules(dashboardModules)
+        modules[index] = module
+        dashboardModules = modules
     }
 
-    var dashboardPageA: DashboardPageContent {
-        dashboardSnapshot.page(
-            modules: dashboardModules,
-            pageIndex: 0,
-            stockOffset: 0
+    func addDashboardPage() {
+        dashboardModules = Self.normalizedDashboardModules(
+            dashboardModules + [.network, .stocks]
         )
     }
 
-    var dashboardPageB: DashboardPageContent {
-        dashboardSnapshot.page(
-            modules: dashboardModules,
-            pageIndex: 1,
-            stockOffset: min(2, max(0, dashboardSnapshot.stocks.count - 1))
-        )
+    func removeDashboardPage(at pageIndex: Int) {
+        let modules = Self.normalizedDashboardModules(dashboardModules)
+        guard modules.count > 2, (0..<(modules.count / 2)).contains(pageIndex) else {
+            return
+        }
+        var updated = modules
+        updated.removeSubrange((pageIndex * 2)..<(pageIndex * 2 + 2))
+        dashboardModules = updated
+        dashboardPageIndex %= updated.count / 2
+    }
+
+    var dashboardPages: [DashboardPageContent] {
+        let modules = Self.normalizedDashboardModules(dashboardModules)
+        return (0..<(modules.count / 2)).map {
+            dashboardSnapshot.page(
+                modules: modules,
+                pageIndex: $0,
+                stockOffset: dashboardStockOffset
+            )
+        }
+    }
+
+    func nextDashboardPage() {
+        let pageCount = Self.normalizedDashboardModules(dashboardModules).count / 2
+        dashboardPageIndex = (dashboardPageIndex + 1) % pageCount
+        dashboardRotationElapsedSeconds = 0
+        pushCurrentDashboardPage()
+    }
+
+    func nextDashboardStockPage() {
+        dashboardStockOffset += 4
+        dashboardStockElapsedSeconds = 0
+        pushCurrentDashboardPage()
     }
 
     var filteredPets: [PetCatalogItem] {
@@ -684,6 +732,72 @@ final class AppModel: ObservableObject {
                 self.diagnosticMessage = "Petdex load failed: \(error)"
             }
         }
+    }
+
+    /// Asynchronously decodes the idle animation of the given pet so the picker
+    /// sheet can render a looping preview. Cheap to cancel and re-issue when a
+    /// different pet is tapped.
+    func loadPetPreview(for item: PetCatalogItem?) {
+        petPreviewTask?.cancel()
+        petPreviewFrames = []
+        petPreviewFrameDurationsMS = []
+        petPreviewFailed = false
+        petPreviewItemID = item?.id
+        guard let item else {
+            petPreviewLoading = false
+            return
+        }
+        petPreviewLoading = true
+        petPreviewTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let decoded = try await self.petCatalog.animation(
+                    for: item,
+                    choice: .idle,
+                    minimumFrameMS: 1,
+                    maximumFrameMS: 2_000
+                )
+                if Task.isCancelled { return }
+                let images = decoded.frames.compactMap { Self.cgImage(from: $0.raster) }
+                guard images.count == decoded.frames.count, !Task.isCancelled else {
+                    self.petPreviewFailed = true
+                    self.petPreviewLoading = false
+                    return
+                }
+                self.petPreviewFrames = images
+                self.petPreviewFrameDurationsMS = decoded.frames.map { Int($0.durationMS) }
+                self.petPreviewLoading = false
+            } catch is CancellationError {
+                // Superseded by a newer selection — leave state to the new task.
+            } catch {
+                self.petPreviewFailed = true
+                self.petPreviewLoading = false
+            }
+        }
+    }
+
+    private static func cgImage(from raster: AssetRaster) -> CGImage? {
+        var rgba = Data(capacity: raster.pixels.count * 4)
+        for pixel in raster.pixels {
+            rgba.append(pixel.red)
+            rgba.append(pixel.green)
+            rgba.append(pixel.blue)
+            rgba.append(pixel.alpha)
+        }
+        guard let provider = CGDataProvider(data: rgba as CFData) else { return nil }
+        return CGImage(
+            width: raster.width,
+            height: raster.height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: raster.width * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
     }
 
     func downloadSelectedPet() {
@@ -755,9 +869,9 @@ final class AppModel: ObservableObject {
                     )
                 }
                 self.previewLayout = nil
-                self.screenMode = .pet
+                self.screenMode = .dashboard
                 self.upload = .active(prepared.sha256)
-                self.petCatalogStatus = "\(item.displayName) uploaded · commit to display"
+                self.petCatalogStatus = "\(item.displayName) uploaded · install the dashboard"
             } catch is CancellationError {
                 await self.abortActiveUpload(using: session)
                 self.upload = .cancelled
@@ -781,11 +895,20 @@ final class AppModel: ObservableObject {
                 )
                 self.dashboardSnapshot = snapshot
                 if self.liveDashboardEnabled {
-                    let page = self.dashboardPageContent(
-                        snapshot: snapshot,
-                        tick: self.dashboardTick
-                    )
-                    self.dashboardTick &+= 1
+                    self.dashboardRotationElapsedSeconds += 2
+                    self.dashboardStockElapsedSeconds += 2
+                    if self.dashboardRotationElapsedSeconds >= self.dashboardPageDurationSeconds {
+                        let pageCount = Self.normalizedDashboardModules(
+                            self.dashboardModules
+                        ).count / 2
+                        self.dashboardPageIndex = (self.dashboardPageIndex + 1) % pageCount
+                        self.dashboardRotationElapsedSeconds = 0
+                    }
+                    if self.dashboardStockElapsedSeconds >= 4 {
+                        self.dashboardStockOffset += 3
+                        self.dashboardStockElapsedSeconds = 0
+                    }
+                    let page = self.dashboardPageContent(snapshot: snapshot)
                     await self.pushLiveDashboard(page)
                 }
                 do {
@@ -802,23 +925,37 @@ final class AppModel: ObservableObject {
               isCurrentScreenConfigured, currentScreenSelection?.mode == .dashboard else {
             return
         }
-        let values = [
-            ("left-title", page.left.title),
-            ("left-line1", page.left.line1),
-            ("left-line2", page.left.line2),
-            ("right-title", page.right.title),
-            ("right-line1", page.right.line1),
-            ("right-line2", page.right.line2),
-        ]
+        var values: [(String, WidgetUpdateState)] = []
+        let tiles = [("left", page.left), ("right", page.right)]
+        for (side, tile) in tiles {
+            values.append((
+                "\(side)-content",
+                tile.module == .pet ? .stale : .freshText(tile.screenText)
+            ))
+            if tile.module == .system {
+                values.append((
+                    "\(side)-cpu",
+                    .freshNumber(.init(coefficient: Int64(dashboardSnapshot.cpuPercent), scale: 0))
+                ))
+                values.append((
+                    "\(side)-memory",
+                    .freshNumber(.init(coefficient: Int64(dashboardSnapshot.memoryPercent), scale: 0))
+                ))
+            } else {
+                values.append(("\(side)-cpu", .stale))
+                values.append(("\(side)-memory", .stale))
+            }
+        }
         if let font = availableScreen?.fonts.first {
             previewLayout = makeLiveDashboardLayout(
                 font: .init(id: font.id, version: font.version),
                 revision: revision,
-                page: page
+                page: page,
+                petAsset: activeDashboardPetAsset
             )
         }
         do {
-            for (widgetID, value) in values {
+            for (widgetID, state) in values {
                 let next = widgetSequence &+ 1
                 guard next != 0 else {
                     liveDashboardEnabled = false
@@ -830,7 +967,7 @@ final class AppModel: ObservableObject {
                     revision: revision,
                     widgetID: widgetID,
                     sequence: next,
-                    state: .freshText(value)
+                    state: state
                 ))
             }
         } catch {
@@ -840,23 +977,28 @@ final class AppModel: ObservableObject {
     }
 
     private func dashboardPageContent(
-        snapshot: LiveDashboardSnapshot,
-        tick: UInt64
+        snapshot: LiveDashboardSnapshot
     ) -> DashboardPageContent {
-        let ticksPerPage = UInt64(max(1, dashboardPageDurationSeconds / 2))
-        let pageIndex = Int((tick / ticksPerPage) & 1)
-        let stockOffset = Int(tick / 2)
         return snapshot.page(
             modules: dashboardModules,
-            pageIndex: pageIndex,
-            stockOffset: stockOffset
+            pageIndex: dashboardPageIndex,
+            stockOffset: dashboardStockOffset
         )
+    }
+
+    private func pushCurrentDashboardPage() {
+        guard liveDashboardEnabled else { return }
+        let page = dashboardPageContent(snapshot: dashboardSnapshot)
+        Task { [weak self] in
+            await self?.pushLiveDashboard(page)
+        }
     }
 
     private func makeLiveDashboardLayout(
         font: ScreenFontReference,
         revision: UInt32,
-        page: DashboardPageContent
+        page: DashboardPageContent,
+        petAsset: UploadedAssetSummary?
     ) -> ScreenLayout {
         let tiles: [(
             side: String,
@@ -867,40 +1009,96 @@ final class AppModel: ObservableObject {
             ("left", 8, 0x6ED0FF, page.left),
             ("right", 222, 0xFFD166, page.right),
         ]
-        let rows: [(suffix: String, y: Int16, color: UInt32)] = [
-            ("title", 9, 0),
-            ("line1", 47, 0xFFFFFF),
-            ("line2", 82, 0xB8C4CE),
-        ]
         var objects: [ScreenRootObject] = []
         var widgets: [ScreenWidgetDeclaration] = []
         for (tileIndex, tile) in tiles.enumerated() {
-            let values = [tile.content.title, tile.content.line1, tile.content.line2]
-            for (rowIndex, row) in rows.enumerated() {
-                let widgetID = "\(tile.side)-\(row.suffix)"
-                let objectID = "\(widgetID)-value"
+            let contentWidgetID = "\(tile.side)-content"
+            let contentObjectID = "\(contentWidgetID)-value"
+            objects.append(.init(
+                x: tile.x,
+                y: 9,
+                node: .dynamicLabel(
+                    base: .init(
+                        id: contentObjectID,
+                        width: 198,
+                        height: 124,
+                        z: Int16(tileIndex * 4),
+                        clip: true,
+                        visible: tile.content.module != .pet
+                    ),
+                    align: .left,
+                    colorRGB888: tile.titleColor,
+                    font: font,
+                    widgetID: contentWidgetID
+                )
+            ))
+            widgets.append(.text(
+                id: contentWidgetID,
+                target: contentObjectID,
+                fallback: tile.content.screenText
+            ))
+
+            let gauges: [(name: String, x: Int16, value: Int)] = [
+                ("cpu", tile.x + 13, dashboardSnapshot.cpuPercent),
+                ("memory", tile.x + 105, dashboardSnapshot.memoryPercent),
+            ]
+            for (gaugeIndex, gauge) in gauges.enumerated() {
+                let widgetID = "\(tile.side)-\(gauge.name)"
+                let objectID = "\(widgetID)-gauge"
                 objects.append(.init(
-                    x: tile.x,
-                    y: row.y,
-                    node: .dynamicLabel(
+                    x: gauge.x,
+                    y: 42,
+                    node: .progress(
                         base: .init(
                             id: objectID,
-                            width: 198,
-                            height: 20,
-                            z: Int16(tileIndex * rows.count + rowIndex),
+                            width: 80,
+                            height: 80,
+                            z: Int16(tileIndex * 4 + gaugeIndex + 1),
                             clip: true,
-                            visible: true
+                            visible: tile.content.module == .system
                         ),
-                        align: .left,
-                        colorRGB888: rowIndex == 0 ? tile.titleColor : row.color,
-                        font: font,
+                        backgroundRGB888: 0x26343F,
+                        fillRGB888: Self.dashboardGaugeColor(gauge.value),
                         widgetID: widgetID
                     )
                 ))
-                widgets.append(.text(
+                widgets.append(.progress(
                     id: widgetID,
                     target: objectID,
-                    fallback: values[rowIndex]
+                    fallback: .init(coefficient: Int64(gauge.value), scale: 0),
+                    min: .init(coefficient: 0, scale: 0),
+                    max: .init(coefficient: 100, scale: 0),
+                    decimals: 0
+                ))
+            }
+
+            let sideOffset = tile.side == "left" ? 0 : 1
+            let sideUsesPet = stride(
+                from: sideOffset,
+                to: dashboardModules.count,
+                by: 2
+            ).contains { dashboardModules[$0] == .pet }
+            if sideUsesPet, let petAsset {
+                let manifest = ScreenPetManifest(
+                    id: "\(tile.side)-pet",
+                    states: [.idle: .asset(sha256: petAsset.sha256)]
+                )
+                objects.append(.init(
+                    x: tile.x,
+                    y: 6,
+                    node: .pet(
+                        base: .init(
+                            id: "\(tile.side)-pet-view",
+                            width: 198,
+                            height: 129,
+                            z: Int16(tileIndex * 4 + 3),
+                            clip: true,
+                            visible: tile.content.module == .pet
+                        ),
+                        backgroundRGB888: 0x081018,
+                        fit: .contain,
+                        manifest: manifest
+                    )
                 ))
             }
         }
@@ -1167,6 +1365,20 @@ final class AppModel: ObservableObject {
         return .none
     }
 
+    private static func normalizedDashboardModules(
+        _ modules: [DashboardModule]
+    ) -> [DashboardModule] {
+        LiveDashboardSnapshot.normalizedModules(modules)
+    }
+
+    private static func dashboardGaugeColor(_ percent: Int) -> UInt32 {
+        let colors: [UInt32] = [
+            0x32D74B, 0x73C944, 0xA8C83A, 0xD7B83B,
+            0xF39A3D, 0xFF6B3D, 0xFF453A,
+        ]
+        return colors[min(max(percent, 0) / 15, colors.count - 1)]
+    }
+
     private static func isPrintableASCII(_ value: String) -> Bool {
         !value.isEmpty && value.utf8.allSatisfy { (0x20...0x7e).contains($0) }
     }
@@ -1367,6 +1579,7 @@ final class AppModel: ObservableObject {
         previewLayout = nil
         liveDashboardEnabled = false
         pendingLiveDashboardCommit = false
+        activeDashboardPetAsset = nil
         currentScreenSelection = nil
         pendingScreenCommit = nil
         resetGestures()
@@ -1411,17 +1624,10 @@ final class AppModel: ObservableObject {
             liveDashboardEnabled = pendingLiveDashboardCommit && pending.mode == .dashboard
             pendingLiveDashboardCommit = false
             if liveDashboardEnabled {
-                let page = dashboardPageContent(
-                    snapshot: dashboardSnapshot,
-                    tick: dashboardTick
-                )
-                dashboardTick &+= 1
+                let page = dashboardPageContent(snapshot: dashboardSnapshot)
                 Task { [weak self] in
                     await self?.pushLiveDashboard(page)
                 }
-            }
-            if pending.mode == .pet {
-                petCatalogStatus = "Pet active on device"
             }
         }
         currentScreenSelection = selection

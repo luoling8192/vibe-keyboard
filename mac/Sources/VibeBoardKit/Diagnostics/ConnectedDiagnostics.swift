@@ -64,6 +64,8 @@ public actor InertDiagnosticActionAdapter: PermissionAuthorizing, InputInjecting
     public func wakeApplication() async throws { throw ConnectedDiagnosticError.unexpectedAction("wakeApplication") }
     public func launchApplication(bundleIdentifier: String) async throws { throw ConnectedDiagnosticError.unexpectedAction("launchApplication") }
     public func toggleVoiceInput() async throws { throw ConnectedDiagnosticError.unexpectedAction("voiceInput") }
+    public func advanceDashboardPage() async throws { throw ConnectedDiagnosticError.unexpectedAction("dashboardPage") }
+    public func advanceDashboardStocks() async throws { throw ConnectedDiagnosticError.unexpectedAction("dashboardStocks") }
     public func interactWithPet(_ interaction: String) async throws { throw ConnectedDiagnosticError.unexpectedAction("petInteraction") }
     public func execute(_ command: CommandSpecification) async throws -> CommandResult {
         throw ConnectedDiagnosticError.unexpectedAction("command")

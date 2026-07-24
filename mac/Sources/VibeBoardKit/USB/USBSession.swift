@@ -1060,8 +1060,16 @@ public actor USBSession {
     }
 
     private func performWrite(timeout: Duration, encoder: () throws -> Data) async throws {
-        guard !writeInProgress else {
-            throw USBSessionError.protocolFailure("concurrent write")
+        let waitDeadline = Self.deadline(
+            start: clock.nowNanoseconds(),
+            duration: timeout
+        )
+        while writeInProgress {
+            try Task.checkCancellation()
+            guard clock.nowNanoseconds() < waitDeadline else {
+                throw USBSessionError.writeTimedOut
+            }
+            try await Task.sleep(for: .milliseconds(5))
         }
         writeInProgress = true
         do {

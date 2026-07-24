@@ -120,6 +120,8 @@ public enum HostAction: Equatable, Sendable {
     case customCommand(CommandSpecification)
     case launchApplication(bundleIdentifier: String)
     case screenMode(ScreenMode)
+    case dashboardNextPage
+    case dashboardNextStocks
     case petInteraction(String)
 }
 
@@ -146,6 +148,8 @@ extension HostAction: Codable {
         case customCommand = "custom_command"
         case launchApplication = "launch_application"
         case screenMode = "screen_mode"
+        case dashboardNextPage = "dashboard_next_page"
+        case dashboardNextStocks = "dashboard_next_stocks"
         case petInteraction = "pet_interaction"
     }
 
@@ -169,6 +173,10 @@ extension HostAction: Codable {
             self = .launchApplication(bundleIdentifier: try Self.requireNonempty(container.decode(String.self, forKey: .bundleIdentifier), action: kind.rawValue))
         case .screenMode:
             self = .screenMode(try container.decode(ScreenMode.self, forKey: .mode))
+        case .dashboardNextPage:
+            self = .dashboardNextPage
+        case .dashboardNextStocks:
+            self = .dashboardNextStocks
         case .petInteraction:
             self = .petInteraction(try Self.requireNonempty(container.decode(String.self, forKey: .interaction), action: kind.rawValue))
         }
@@ -198,6 +206,10 @@ extension HostAction: Codable {
         case let .screenMode(mode):
             try container.encode(Kind.screenMode, forKey: .type)
             try container.encode(mode, forKey: .mode)
+        case .dashboardNextPage:
+            try container.encode(Kind.dashboardNextPage, forKey: .type)
+        case .dashboardNextStocks:
+            try container.encode(Kind.dashboardNextStocks, forKey: .type)
         case let .petInteraction(interaction):
             try container.encode(Kind.petInteraction, forKey: .type)
             try container.encode(Self.requireNonempty(interaction, action: Kind.petInteraction.rawValue), forKey: .interaction)

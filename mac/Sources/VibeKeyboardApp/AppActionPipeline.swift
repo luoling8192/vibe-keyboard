@@ -17,9 +17,19 @@ enum ProductionActionError: Error, CustomStringConvertible {
 
 actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, ApplicationControlling, VoiceInputControlling, ScreenControlling {
     private var screenHandler: (@MainActor @Sendable (ScreenMode) -> Void)?
+    private var dashboardPageHandler: (@MainActor @Sendable () -> Void)?
+    private var dashboardStocksHandler: (@MainActor @Sendable () -> Void)?
 
     func setScreenHandler(_ handler: @escaping @MainActor @Sendable (ScreenMode) -> Void) {
         screenHandler = handler
+    }
+
+    func setDashboardHandlers(
+        nextPage: @escaping @MainActor @Sendable () -> Void,
+        nextStocks: @escaping @MainActor @Sendable () -> Void
+    ) {
+        dashboardPageHandler = nextPage
+        dashboardStocksHandler = nextStocks
     }
 
     func require(_ permission: InputPermission) async throws {
@@ -66,6 +76,20 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
     func activate(mode: ScreenMode) async throws {
         guard let screenHandler else { throw ProductionActionError.unsupported("screen mode") }
         await screenHandler(mode)
+    }
+
+    func advanceDashboardPage() async throws {
+        guard let dashboardPageHandler else {
+            throw ProductionActionError.unsupported("dashboard page")
+        }
+        await dashboardPageHandler()
+    }
+
+    func advanceDashboardStocks() async throws {
+        guard let dashboardStocksHandler else {
+            throw ProductionActionError.unsupported("dashboard stocks")
+        }
+        await dashboardStocksHandler()
     }
 
     func interactWithPet(_ interaction: String) async throws {

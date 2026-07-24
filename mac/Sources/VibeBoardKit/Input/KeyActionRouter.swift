@@ -28,6 +28,8 @@ public protocol VoiceInputControlling: Sendable {
 
 public protocol ScreenControlling: Sendable {
     func activate(mode: ScreenMode) async throws
+    func advanceDashboardPage() async throws
+    func advanceDashboardStocks() async throws
     func interactWithPet(_ interaction: String) async throws
 }
 
@@ -132,6 +134,10 @@ public actor KeyActionRouter {
             try await applications.launchApplication(bundleIdentifier: bundleIdentifier)
         case let .screenMode(mode):
             try await screen.activate(mode: mode)
+        case .dashboardNextPage:
+            try await screen.advanceDashboardPage()
+        case .dashboardNextStocks:
+            try await screen.advanceDashboardStocks()
         case let .petInteraction(interaction):
             guard !interaction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw InputConfigurationError.missingAssociatedValue(action: "petInteraction")
