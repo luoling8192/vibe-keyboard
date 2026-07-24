@@ -139,12 +139,37 @@ actor ProductionPetCatalog: PetCatalogProviding {
     )!
     private static let maximumManifestBytes = 12 * 1_024 * 1_024
     private static let maximumSpritesheetBytes = 32 * 1_024 * 1_024
+    private static let cacheMaxAge: TimeInterval = 3600  // 1 hour
+
+    private let cacheURL: URL
+
+    init() {
+        let support = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first!.appendingPathComponent("VibeKeyboard", isDirectory: true)
+        cacheURL = support.appendingPathComponent("petdex-cache.json", isDirectory: false)
+    }
 
     func localPets() async -> [PetCatalogItem] {
         Self.readLocalPets()
     }
 
     func petdexPets() async throws -> [PetCatalogItem] {
+        // Try network first; fall back to cache on failure.
+        do {
+            let items = try await fetchRemotePets()
+            try? saveCache(items)
+            return items
+        } catch {
+            if let cached = readCache() {
+                return cached
+            }
+            throw error
+        }
+    }
+
+    private func fetchRemotePets() async throws -> [PetCatalogItem] {
         var request = URLRequest(url: Self.manifestURL)
         request.timeoutInterval = 30
         let data = try await Self.download(
@@ -169,6 +194,64 @@ actor ProductionPetCatalog: PetCatalogProviding {
                 kind: value.kind,
                 submittedBy: value.submittedBy,
                 source: .petdex(value.spritesheetURL)
+            )
+        }
+    }
+
+    private struct CachedPetdex: Codable {
+        let timestamp: Date
+        let pets: [CachedPet]
+    }
+
+    private struct CachedPet: Codable {
+        let slug: String
+        let displayName: String
+        let kind: String
+        let submittedBy: String?
+        let spritesheetURL: String
+    }
+
+    private func saveCache(_ items: [PetCatalogItem]) throws {
+        let cached = CachedPetdex(
+            timestamp: Date(),
+            pets: items.map { pet in
+                let url: String
+                if case .petdex(let petURL) = pet.source {
+                    url = petURL.absoluteString
+                } else {
+                    url = ""
+                }
+                return CachedPet(
+                    slug: pet.slug,
+                    displayName: pet.displayName,
+                    kind: pet.kind,
+                    submittedBy: pet.submittedBy,
+                    spritesheetURL: url
+                )
+            }
+        )
+        let dir = cacheURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(cached)
+        try data.write(to: cacheURL, options: .atomic)
+    }
+
+    private func readCache() -> [PetCatalogItem]? {
+        guard let data = try? Data(contentsOf: cacheURL),
+              let cached = try? JSONDecoder().decode(CachedPetdex.self, from: data) else {
+            return nil
+        }
+        // Use cache even if stale — better than nothing when offline.
+        return cached.pets.compactMap { pet in
+            guard let url = URL(string: pet.spritesheetURL),
+                  Self.allowedRemoteURL(url) else { return nil }
+            return PetCatalogItem(
+                id: "petdex:\(pet.slug)",
+                slug: pet.slug,
+                displayName: pet.displayName,
+                kind: pet.kind,
+                submittedBy: pet.submittedBy,
+                source: .petdex(url)
             )
         }
     }

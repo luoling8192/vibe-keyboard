@@ -379,6 +379,9 @@ struct VibeBoardDiagnostic {
 
         do {
             _ = try await session.connect(handshakeTimeout: .seconds(min(timeoutSeconds, 20)))
+            try await Task.sleep(for: .milliseconds(500))
+            try await session.send(.interactionMode(.holdToTalk))
+            try await session.send(.voiceKey(.k1))
             try await session.send(.uiState(.listening, text: ""))
             let deadline = ContinuousClock.now.advanced(by: .seconds(timeoutSeconds))
             while ContinuousClock.now < deadline {

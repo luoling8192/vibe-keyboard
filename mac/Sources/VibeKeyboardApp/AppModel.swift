@@ -247,8 +247,6 @@ final class AppModel: ObservableObject {
     @Published private(set) var audioState: AudioRecordingState = .ready
     @Published private(set) var lastRecording: String = "None"
     @Published private(set) var diagnosticMessage: String?
-    @Published private(set) var previewPixels: [UInt16]?
-    @Published private(set) var previewLayout: ScreenLayout?
     @Published private(set) var lastActionResult: String?
     @Published private(set) var inputPermissionGranted = AXIsProcessTrusted()
     @Published private(set) var dashboardSnapshot = LiveDashboardSnapshot.empty
@@ -406,9 +404,8 @@ final class AppModel: ObservableObject {
     func setVoiceTriggerHotkey(_ shortcut: KeyboardShortcut?) {
         voiceTriggerHotkey = shortcut
         saveVoiceInputSettings()
-        Task { [weak self, adapter = actionPipeline] in
-            guard let adapter = adapter as? ProductionHostActionAdapter else { return }
-            await adapter.configureVoiceHotkey(shortcut)
+        Task { [weak self] in
+            await self?.actionPipeline?.configureVoiceHotkey(shortcut)
         }
     }
 
@@ -514,8 +511,6 @@ final class AppModel: ObservableObject {
                 self.activeTransferID = nil
                 self.lastUploadedAsset = UploadedAssetSummary(sha256: prepared.sha256, totalBytes: result.totalBytes, kind: prepared.kind)
                 self.uploadedPetID = nil
-                self.previewPixels = try VKA1Codec.decode(container, limits: limits).frames.first?.pixels
-                self.previewLayout = nil
                 self.screenMode = pet ? .dashboard : .image
                 self.upload = .active(prepared.sha256)
             } catch is CancellationError {
@@ -614,8 +609,6 @@ final class AppModel: ObservableObject {
             ],
             widgets: [.text(id: "status", target: "status-value", fallback: widgetText)]
         )
-        previewLayout = layout
-        previewPixels = nil
         commit(payload: mode == .dashboard ? .dashboard(layout) : .custom(layout), assets: [])
         _ = context
     }
@@ -670,8 +663,6 @@ final class AppModel: ObservableObject {
             page: dashboardPageContent(snapshot: dashboardSnapshot),
             petAsset: petAsset
         )
-        previewLayout = layout
-        previewPixels = nil
         screenMode = .dashboard
         activeDashboardPetAsset = petAsset
         pendingLiveDashboardCommit = true
@@ -913,16 +904,6 @@ final class AppModel: ObservableObject {
                     kind: prepared.kind
                 )
                 self.uploadedPetID = item.id
-                self.previewPixels = try decoded.frames.first.map {
-                    try AssetPixelConverter.convert(
-                        $0.raster,
-                        width: 428,
-                        height: 142,
-                        fit: .contain,
-                        background: AssetRGB888(red: 0, green: 0, blue: 0)
-                    )
-                }
-                self.previewLayout = nil
                 self.screenMode = .dashboard
                 self.upload = .active(prepared.sha256)
                 self.petCatalogStatus = "\(item.displayName) uploaded · install the dashboard"
@@ -999,14 +980,6 @@ final class AppModel: ObservableObject {
                 values.append(("\(side)-cpu", .stale))
                 values.append(("\(side)-memory", .stale))
             }
-        }
-        if let font = availableScreen?.fonts.first {
-            previewLayout = makeLiveDashboardLayout(
-                font: .init(id: font.id, version: font.version),
-                revision: revision,
-                page: page,
-                petAsset: activeDashboardPetAsset
-            )
         }
         do {
             for (widgetID, state) in values {
@@ -1574,12 +1547,20 @@ final class AppModel: ObservableObject {
 
     private func consumeAudio(_ frame: AudioFrame) {
         // BlackHole path: decode Opus → PCM → virtual device for third-party apps.
-        // Runs independently of Ogg file recording; both can be active at once.
+        // The hotkey is posted together with pipeline start/stop so the dictation
+        // app (Vokie/Typeless/etc.) begins capturing from BlackHole at the exact
+        // moment audio starts flowing — not before (when BlackHole is empty) or
+        // after (when audio is already missed).
         if voiceInputMode == .blackhole {
             if frame.flags & 0x01 != 0 {
                 livePipeline = LiveAudioPipeline(deviceName: blackholeDeviceName)
                 do {
                     try livePipeline?.start()
+                    // Trigger the dictation app's hotkey so it starts listening
+                    // from BlackHole at the same time PCM begins flowing.
+                    Task { [weak self] in
+                        try? await self?.actionPipeline?.postVoiceHotkey()
+                    }
                 } catch {
                     diagnosticMessage = "BlackHole pipeline start failed: \(error)"
                     livePipeline = nil
@@ -1589,6 +1570,10 @@ final class AppModel: ObservableObject {
             if frame.flags & 0x02 != 0 {
                 livePipeline?.stop()
                 livePipeline = nil
+                // Post the hotkey again to toggle the dictation app off.
+                Task { [weak self] in
+                    try? await self?.actionPipeline?.postVoiceHotkey()
+                }
             }
         }
 
@@ -1652,8 +1637,6 @@ final class AppModel: ObservableObject {
         recordingDestination = nil
         livePipeline?.stop()
         livePipeline = nil
-        previewPixels = nil
-        previewLayout = nil
         liveDashboardEnabled = false
         pendingLiveDashboardCommit = false
         activeDashboardPetAsset = nil

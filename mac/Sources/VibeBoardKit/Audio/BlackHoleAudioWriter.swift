@@ -192,13 +192,16 @@ public final class BlackHoleAudioWriter: @unchecked Sendable {
         // Only fill the first buffer (BlackHole interleaves all channels)
         let audioBuffer = withUnsafePointer(to: outputData.pointee.mBuffers) { $0.pointee }
         guard let mData = audioBuffer.mData else { return }
+        guard deviceChannels > 0, bytesPerSample > 0 else { return }
         let frameCount = Int(audioBuffer.mDataByteSize) / Int(deviceChannels) / bytesPerSample
+        guard frameCount > 0 else { return }
         let output = mData.assumingMemoryBound(to: Float32.self)
 
         ringLock.lock()
         defer { ringLock.unlock() }
 
-        for i in 0..<(frameCount * Int(deviceChannels)) {
+        let totalSamples = frameCount * Int(deviceChannels)
+        for i in 0..<totalSamples {
             if availableSamples() > 0 {
                 output[i] = ringBuffer[readPos]
                 advanceReadPos()

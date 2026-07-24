@@ -75,8 +75,14 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
     }
 
     func toggleVoiceInput() async throws {
-        // Posts the configured global hotkey to trigger a third-party dictation
-        // app (Typeless, Vokie, Superwhisper, etc.) which captures from BlackHole.
+        guard let shortcut = voiceHotkey else { return }
+        try await sendShortcut(shortcut)
+    }
+
+    /// Posts the configured hotkey. Called by AppModel from consumeAudio()
+    /// when BlackHole audio starts/stops, so the dictation app and the
+    /// BlackHole audio stream are synchronized.
+    func postVoiceHotkey() async throws {
         guard let shortcut = voiceHotkey else { return }
         try await sendShortcut(shortcut)
     }
@@ -161,11 +167,14 @@ protocol AppActionRouting: Sendable {
     func consume(_ event: DeviceKeyEvent, at timestampMilliseconds: UInt64) async throws -> [ActionExecutionResult]
     func execute(_ action: HostAction) async throws -> ActionExecutionResult
     func disconnect(at timestampMilliseconds: UInt64) async throws
+    func configureVoiceHotkey(_ shortcut: KeyboardShortcut?) async
+    func postVoiceHotkey() async throws
 }
 
 actor AppGestureActionPipeline: AppActionRouting {
     private var gestures: GestureRouter
     private let actions: KeyActionRouter
+    private let adapter: ProductionHostActionAdapter
 
     init(profile: KeyMappingProfile, adapter: ProductionHostActionAdapter) throws {
         gestures = GestureRouter(policy: try GesturePolicy(
@@ -183,6 +192,7 @@ actor AppGestureActionPipeline: AppActionRouting {
             screen: adapter,
             commands: ProcessCommandExecutor()
         )
+        self.adapter = adapter
     }
 
     func updateProfile(_ profile: KeyMappingProfile) async throws {
@@ -202,5 +212,13 @@ actor AppGestureActionPipeline: AppActionRouting {
 
     func disconnect(at timestampMilliseconds: UInt64) async throws {
         _ = try gestures.handle(.disconnect, at: timestampMilliseconds)
+    }
+
+    func postVoiceHotkey() async throws {
+        try await adapter.postVoiceHotkey()
+    }
+
+    func configureVoiceHotkey(_ shortcut: KeyboardShortcut?) async {
+        await adapter.configureVoiceHotkey(shortcut)
     }
 }

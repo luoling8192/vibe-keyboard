@@ -554,6 +554,8 @@ private actor ActionPipelineSpy: AppActionRouting {
         return .completed
     }
     func disconnect(at timestampMilliseconds: UInt64) async throws { resets += 1 }
+    func configureVoiceHotkey(_ shortcut: KeyboardShortcut?) async {}
+    func postVoiceHotkey() async throws {}
     func eventCount() -> Int { events.count }
     func timestamps() -> [UInt64] { eventTimestamps }
     func resetCount() -> Int { resets }
