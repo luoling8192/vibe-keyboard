@@ -1,0 +1,28 @@
+<UserControl x:Class="VibeKeyboardApp.Views.ScreenPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="24">
+            <DockPanel Margin="0,0,0,16">
+                <TextBlock Text="Screen" FontSize="24" FontWeight="Bold"/>
+            </DockPanel>
+
+            <Border Background="#F0F0F0" CornerRadius="12" Padding="16">
+                <StackPanel>
+                    <TextBlock Text="Mode" FontWeight="Bold" Margin="0,0,0,8"/>
+                    <StackPanel Orientation="Horizontal">
+                        <RadioButton Content="Image" Margin="0,0,16,0" IsChecked="True"/>
+                        <RadioButton Content="Dashboard" Margin="0,0,16,0"/>
+                    </StackPanel>
+
+                    <Separator Margin="0,8"/>
+                    <Button Content="Query device screen" Padding="12,4" Margin="0,8"/>
+                    <Button Content="Commit uploaded image" Padding="12,4" Margin="0,8"/>
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="{Binding UploadLabel}" Foreground="Gray" Margin="0,8"/>
+            <ProgressBar Height="8" Margin="0,4"/>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

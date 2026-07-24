@@ -1,0 +1,60 @@
+<Window x:Class="VibeKeyboardApp.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:VibeKeyboardApp.ViewModels"
+        Title="Vibe Keyboard" Height="700" Width="1040"
+        WindowStartupLocation="CenterScreen"
+        Loaded="Window_Loaded">
+    <Window.DataContext>
+        <vm:AppModel/>
+    </Window.DataContext>
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="200"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- Navigation -->
+        <ListBox x:Name="NavList" Grid.Column="0" Margin="8"
+                 SelectedIndex="{Binding (vm:AppModel.SelectedPageIndex), Mode=TwoWay}"
+                 SelectionChanged="NavList_SelectionChanged">
+            <ListBoxItem>Device</ListBoxItem>
+            <ListBoxItem>Screen</ListBoxItem>
+            <ListBoxItem>Keys</ListBoxItem>
+            <ListBoxItem>Audio</ListBoxItem>
+            <ListBoxItem>Firmware</ListBoxItem>
+        </ListBox>
+
+        <!-- Content -->
+        <Grid Grid.Column="1" Margin="8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <ContentControl x:Name="ContentArea" Grid.Row="0" Margin="8"/>
+
+            <!-- Status bar -->
+            <Border Grid.Row="1" BorderBrush="LightGray" BorderThickness="0,1,0,0" Padding="8,4">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" VerticalAlignment="Center">
+                        <Run Text="Status: "/>
+                        <Run Text="{Binding ConnectionTitle, Mode=OneWay}"/>
+                        <Run Text="  |  Device: "/>
+                        <Run Text="{Binding DeviceID, Mode=OneWay}"/>
+                        <Run Text="  |  Firmware: "/>
+                        <Run Text="{Binding FirmwareVersion, Mode=OneWay}"/>
+                    </TextBlock>
+                    <TextBlock Grid.Column="1" VerticalAlignment="Center"
+                               Foreground="Red"
+                               Text="{Binding DiagnosticMessage, Mode=OneWay}"/>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

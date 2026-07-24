@@ -1,0 +1,30 @@
+<UserControl x:Class="VibeKeyboardApp.Views.AudioPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="24">
+            <TextBlock Text="Audio" FontSize="24" FontWeight="Bold" Margin="0,0,0,16"/>
+
+            <Border Background="#F0F0F0" CornerRadius="12" Padding="16">
+                <StackPanel>
+                    <TextBlock Text="Recording" FontWeight="Bold" Margin="0,0,0,8"/>
+
+                    <Grid Margin="0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="150"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Last recording:"/>
+                        <TextBlock Grid.Column="1" Text="{Binding LastRecording}"/>
+                    </Grid>
+
+                    <CheckBox Content="Save recordings to disk" Margin="0,8"
+                              IsChecked="{Binding SaveRecordings}"/>
+
+                    <TextBlock Text="Device capture records Opus audio to an Ogg file."
+                               Foreground="Gray" TextWrapping="Wrap" Margin="0,8"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

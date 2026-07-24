@@ -171,8 +171,7 @@ public interface ISerialPortOperations : IDisposable
 public sealed class SystemIOPortsOperations : ISerialPortOperations
 {
     private SerialPort? _port;
-    private readonly Lock _writeLock = new();
-
+    private readonly object _writeLock = new();
     public bool IsOpen => _port?.IsOpen ?? false;
 
     public void Open(string portName)
@@ -371,7 +370,7 @@ public sealed class USBSession : IDisposable
     private readonly Dictionary<Guid, Func<WidgetProtocolEvent, Task>> _widgetConsumers = new();
 
     // Write serialization
-    private readonly Lock _writeLock = new();
+    private readonly object _writeLock = new();
 
     // Capabilities identity for validation
     private sealed class CapabilityIdentity
@@ -440,15 +439,15 @@ public sealed class USBSession : IDisposable
         {
             // Step 1: announce USB transport
             SetState(USBSessionState.AnnouncingUSBTransport);
-            await SendCommand(new ControlCommand.AnnounceUSBTransport());
+            await Send(new ControlCommand.AnnounceUSBTransport());
 
             // Step 2: request device info
             SetState(USBSessionState.RequestingDeviceInfo);
-            await SendCommand(new ControlCommand.GetDeviceInfo());
+            await Send(new ControlCommand.GetDeviceInfo());
 
             // Step 3: set UI state to ready
             SetState(USBSessionState.SynchronizingConfiguration);
-            await SendCommand(new ControlCommand.UIState(DeviceUIState.Ready, ""));
+            await Send(new ControlCommand.UIState(DeviceUIState.Ready, ""));
 
             // Wait for device_info (and capabilities if replacement)
             var start = _clock.NowNanoseconds();
@@ -508,12 +507,12 @@ public sealed class USBSession : IDisposable
                 var now = _clock.NowNanoseconds();
                 if (now >= nextInfoRequest)
                 {
-                    await SendCommand(new ControlCommand.GetDeviceInfo());
+                    await Send(new ControlCommand.GetDeviceInfo());
                     nextInfoRequest = now + 1_500_000_000;
                 }
                 if (now >= nextPing)
                 {
-                    await SendCommand(new ControlCommand.Ping());
+                    await Send(new ControlCommand.Ping());
                     nextPing = now + 2_000_000_000;
                 }
 
@@ -919,11 +918,8 @@ public sealed class USBSession : IDisposable
         try
         {
             var stateEvent = FrameDecoder.DecodeState(frame.Bytes);
-            if (stateEvent is ParsedFrame.State state)
-            {
-                ConsumeHandshakeEvent(state.Event);
-                EnqueueEvent(new USBSessionEvent.StateEvent(state.Event));
-            }
+            ConsumeHandshakeEvent(stateEvent);
+            EnqueueEvent(new USBSessionEvent.StateEvent(stateEvent));
         }
         catch (ProtocolException) { }
     }

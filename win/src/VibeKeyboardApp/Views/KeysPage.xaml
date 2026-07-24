@@ -1,0 +1,46 @@
+<UserControl x:Class="VibeKeyboardApp.Views.KeysPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="24">
+            <TextBlock Text="Keys" FontSize="24" FontWeight="Bold" Margin="0,0,0,16"/>
+
+            <Border Background="#F0F0F0" CornerRadius="12" Padding="16">
+                <StackPanel>
+                    <TextBlock Text="Key Mapping" FontWeight="Bold" Margin="0,0,0,8"/>
+                    <TextBlock Text="Grant Accessibility access to use paste, Control, and shortcut actions."
+                               Foreground="Gray" TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+                    <Grid Margin="0,8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Key" FontWeight="Bold"/>
+                        <TextBlock Grid.Row="0" Grid.Column="1" Text="Gesture" FontWeight="Bold"/>
+                        <TextBlock Grid.Row="0" Grid.Column="2" Text="Action" FontWeight="Bold"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="K1" Margin="0,4"/>
+                        <TextBlock Grid.Row="1" Grid.Column="1" Text="Single" Margin="0,4"/>
+                        <TextBlock Grid.Row="1" Grid.Column="2" Text="Wake Application" Margin="0,4"/>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="K2" Margin="0,4"/>
+                        <TextBlock Grid.Row="2" Grid.Column="1" Text="Single" Margin="0,4"/>
+                        <TextBlock Grid.Row="2" Grid.Column="2" Text="Paste: 继续" Margin="0,4"/>
+                    </Grid>
+
+                    <Separator Margin="0,12"/>
+                    <TextBlock Text="Custom commands execute the selected absolute executable directly."
+                               Foreground="Gray" TextWrapping="Wrap" FontSize="11"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

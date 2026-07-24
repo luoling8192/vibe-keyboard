@@ -5,32 +5,6 @@ using VibeBoardKit.Protocol;
 namespace VibeBoardKit.LED;
 
 /// <summary>
-/// LED state event from the device.
-/// </summary>
-public sealed class LEDStateEvent
-{
-    public bool Available { get; }
-    public string Source { get; }
-    public uint RequestID { get; }
-    public string? Reason { get; }
-    public bool? Enabled { get; }
-    public byte? Brightness { get; }
-    public string? Effective { get; }
-
-    public LEDStateEvent(bool available, string source, uint requestID,
-        string? reason, bool? enabled, byte? brightness, string? effective)
-    {
-        Available = available;
-        Source = source;
-        RequestID = requestID;
-        Reason = reason;
-        Enabled = enabled;
-        Brightness = brightness;
-        Effective = effective;
-    }
-}
-
-/// <summary>
 /// Service for LED control operations.
 /// Manages query/config commands with epoch validation and acknowledgment tracking.
 /// </summary>
@@ -76,19 +50,18 @@ public sealed class LEDService
     /// </summary>
     public Task Consume(LEDProtocolEvent evt, long responseTimeNanos)
     {
-        if (evt is LEDProtocolEvent.State state)
+        if (evt is LEDProtocolEvent.State stateEvent)
         {
+            var state = stateEvent.Event;
             // Check if this matches our pending request
             if (_pendingRequestID.HasValue && state.RequestID == _pendingRequestID.Value)
             {
                 // Check deadline
                 if (_pendingDeadline.HasValue && DateTime.UtcNow <= _pendingDeadline.Value)
                 {
-                    if (state.Source == "applied" || state.Source == "query")
+                    if (state.Source == LEDStateSource.Applied || state.Source == LEDStateSource.Query)
                     {
-                        _lastState = new LEDStateEvent(
-                            state.Available, state.Source, state.RequestID,
-                            state.Reason, state.Enabled, state.Brightness, state.Effective);
+                        _lastState = state;
                         _pendingRequestID = null;
                         _pendingDeadline = null;
                     }
@@ -100,12 +73,10 @@ public sealed class LEDService
                     _pendingDeadline = null;
                 }
             }
-            else if (state.Source == "applied")
+            else if (state.Source == LEDStateSource.Applied)
             {
                 // Late applied response may update observed state
-                _lastState = new LEDStateEvent(
-                    state.Available, state.Source, state.RequestID,
-                    state.Reason, state.Enabled, state.Brightness, state.Effective);
+                _lastState = state;
             }
         }
         return Task.CompletedTask;

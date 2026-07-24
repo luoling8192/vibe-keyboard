@@ -368,7 +368,7 @@ public sealed class ReplacementCapabilitySnapshot
             if (!BoundedJSON.IsValidIdentifier(id)) throw new ProtocolException("Invalid value: screen.font.id");
             ushort version = BoundedJSON.PositiveUInt16(font["version"]) ?? throw new ProtocolException("Invalid value: screen.font.version");
             string hash = BoundedJSON.String(font["metrics_sha256"]) ?? throw new ProtocolException("Invalid value: screen.font.metrics_sha256");
-            if (!BoundedJSON.IsValidSHA(hash)) throw new ProtocolException("Invalid value: screen.font.metrics_sha256");
+            if (!BoundedJSON.IsValidSHA256(hash)) throw new ProtocolException("Invalid value: screen.font.metrics_sha256");
             fonts.Add(new ScreenFontCapability(id, version, hash));
         }
 

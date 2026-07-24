@@ -163,7 +163,7 @@ public static class BoundedJSON
         return v;
     }
 
-    public static bool IsValidSHA(string value)
+    public static bool IsValidSHA256(string value)
     {
         if (value.Length != 64) return false;
         foreach (char c in value)
