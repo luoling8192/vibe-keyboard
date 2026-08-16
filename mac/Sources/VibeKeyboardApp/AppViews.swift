@@ -538,6 +538,8 @@ private struct KeysPage: View {
     @State private var shortcutOption = false
     @State private var shortcutShift = false
     @State private var heldKey = "right_command"
+    @State private var isCapturingHeldKey = false
+    @State private var heldKeyCaptureStatus: String?
     @State private var commandExecutable = "/usr/bin/open"
     @State private var commandArguments = "-a\nTextEdit"
     @State private var commandTimeout = "5000"
@@ -613,14 +615,40 @@ private struct KeysPage: View {
                 if let result = model.lastActionResult {
                     LabeledContent("Last action", value: result)
                 }
+                GroupBox("Live key diagnostic") {
+                    if let delivery = model.lastKeyDelivery {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Label(
+                                delivery.title,
+                                systemImage: delivery.phase == .failed ? "xmark.circle.fill" : "checkmark.circle.fill"
+                            )
+                            .foregroundStyle(delivery.phase == .failed ? .red : .green)
+                            Text(delivery.detail)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                            Text("This confirms the device event and, when shown, that macOS accepted the submitted event. It cannot confirm a third-party app's internal result, such as WeChat opening voice input.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("Press a VibeBoard key to inspect its delivery path.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 if let message = model.diagnosticMessage {
                     Text(message).font(.caption).foregroundStyle(.red).textSelection(.enabled)
                 }
             }.padding(24)
         }
         .onAppear { loadDrafts() }
-        .onChange(of: model.selectedKey) { _ in loadDrafts() }
-        .onChange(of: selectedGesture) { _ in loadDrafts() }
+        .onChange(of: model.selectedKey) { _ in
+            isCapturingHeldKey = false
+            loadDrafts()
+        }
+        .onChange(of: selectedGesture) { _ in
+            isCapturingHeldKey = false
+            loadDrafts()
+        }
     }
 
     private func binding(_ key: CanonicalKey) -> KeyBindings { model.keyProfile.mappings[key] ?? KeyBindings() }
@@ -644,6 +672,18 @@ private struct KeysPage: View {
             }
             .disabled(textDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         case .holdKey:
+            HStack(spacing: 10) {
+                HeldKeyCaptureButton(key: heldKey, isCapturing: $isCapturingHeldKey) { key in
+                    heldKey = key
+                    model.setAction(.holdKey(key), for: model.selectedKey, gesture: selectedGesture)
+                    model.saveMappings()
+                    heldKeyCaptureStatus = "Captured and saved \(key)."
+                }
+                .frame(width: 190, height: 30)
+                if isCapturingHeldKey {
+                    Button("Cancel") { isCapturingHeldKey = false }
+                }
+            }
             TextField("Key (right_command, f2, space, a…)", text: $heldKey)
                 .frame(maxWidth: 320)
             Button("Apply held key") {
@@ -653,6 +693,11 @@ private struct KeysPage: View {
             Text("The selected key is held while the physical button is down. Use left_command, right_command, left_shift, right_shift, left_option, right_option, left_control, right_control, fn, a–z, 0–9, F1–F20, space, arrows, or return.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let heldKeyCaptureStatus {
+                Text(heldKeyCaptureStatus)
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            }
         case .customShortcut:
             TextField("Key (1, fn, f1…f20, home, pageup)", text: $shortcutKey)
                 .frame(maxWidth: 240)

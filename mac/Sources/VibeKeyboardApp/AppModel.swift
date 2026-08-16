@@ -212,6 +212,48 @@ private struct CurrentScreenSelection: Equatable {
     var revision: UInt32
 }
 
+enum KeyDeliveryPhase: Equatable {
+    case deviceReceived
+    case hostEventSubmitted
+    case actionCompleted
+    case noMappedAction
+    case failed
+}
+
+struct KeyDeliveryStatus: Equatable {
+    let source: CanonicalKey
+    let deviceEvent: String
+    let target: String?
+    let phase: KeyDeliveryPhase
+    let message: String?
+
+    var title: String {
+        switch phase {
+        case .deviceReceived: "VibeBoard event received"
+        case .hostEventSubmitted: "Host key event submitted"
+        case .actionCompleted: "Mapped action completed"
+        case .noMappedAction: "No mapped action"
+        case .failed: "Mapped action failed"
+        }
+    }
+
+    var detail: String {
+        let path = "\(source.rawValue.uppercased()) \(deviceEvent)"
+        switch phase {
+        case .deviceReceived:
+            return "VibeBoard → App: \(path)"
+        case .hostEventSubmitted:
+            return "VibeBoard → App → macOS: \(path) → \(target ?? "key")"
+        case .actionCompleted:
+            return "VibeBoard → App: \(path) → mapped action"
+        case .noMappedAction:
+            return "VibeBoard → App: \(path) → no action was configured"
+        case .failed:
+            return "VibeBoard → App: \(path) → \(message ?? "unknown failure")"
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var selectedPage: AppPage = .device
@@ -236,6 +278,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var previewPixels: [UInt16]?
     @Published private(set) var previewLayout: ScreenLayout?
     @Published private(set) var lastActionResult: String?
+    @Published private(set) var lastKeyDelivery: KeyDeliveryStatus?
     @Published private(set) var inputPermissionGranted = AXIsProcessTrusted()
     @Published private(set) var dashboardSnapshot = LiveDashboardSnapshot.empty
     @Published private(set) var liveDashboardEnabled = false
@@ -1487,8 +1530,15 @@ final class AppModel: ObservableObject {
         default:
             return
         }
+        lastKeyDelivery = .init(
+            source: key,
+            deviceEvent: Self.deviceEventLabel(deviceEvent),
+            target: nil,
+            phase: .deviceReceived,
+            message: nil
+        )
         if case .up = deviceEvent, let heldKey = heldKeysBySource.removeValue(forKey: key) {
-            setHeldKey(heldKey, pressed: false)
+            setHeldKey(heldKey, source: key, pressed: false)
             return
         }
         if case .click = deviceEvent, suppressedHoldClicks.remove(key) != nil {
@@ -1498,35 +1548,85 @@ final class AppModel: ObservableObject {
             if case .down = deviceEvent {
                 heldKeysBySource[key] = heldKey
                 suppressedHoldClicks.insert(key)
-                setHeldKey(heldKey, pressed: true)
+                setHeldKey(heldKey, source: key, pressed: true)
             }
             return
         }
         let timestamp = monotonicClock.nowMilliseconds()
         Task { [weak self] in
-            guard let self, let actionPipeline else { return }
+            guard let self else { return }
+            guard let actionPipeline else {
+                self.lastKeyDelivery = .init(
+                    source: key,
+                    deviceEvent: Self.deviceEventLabel(deviceEvent),
+                    target: nil,
+                    phase: .failed,
+                    message: "Host action pipeline is unavailable"
+                )
+                return
+            }
             do {
                 let results = try await actionPipeline.consume(deviceEvent, at: timestamp)
-                if let result = results.last { self.lastActionResult = Self.actionResultLabel(result) }
+                if let result = results.last {
+                    self.lastActionResult = Self.actionResultLabel(result)
+                    self.lastKeyDelivery = .init(
+                        source: key,
+                        deviceEvent: Self.deviceEventLabel(deviceEvent),
+                        target: nil,
+                        phase: result == .noAction ? .noMappedAction : .actionCompleted,
+                        message: nil
+                    )
+                }
             } catch {
                 let message = Self.actionFailureLabel(error)
                 self.lastActionResult = "Failed — \(message)"
                 self.diagnosticMessage = "Key action failed: \(message)"
+                self.lastKeyDelivery = .init(
+                    source: key,
+                    deviceEvent: Self.deviceEventLabel(deviceEvent),
+                    target: nil,
+                    phase: .failed,
+                    message: message
+                )
             }
         }
     }
 
-    private func setHeldKey(_ key: String, pressed: Bool) {
+    private func setHeldKey(_ key: String, source: CanonicalKey, pressed: Bool) {
         let previous = modifierTask
         modifierTask = Task { [weak self] in
             _ = await previous?.value
-            guard let self, let actionPipeline else { return }
+            guard let self else { return }
+            guard let actionPipeline else {
+                self.lastKeyDelivery = .init(
+                    source: source,
+                    deviceEvent: pressed ? "down" : "up",
+                    target: key,
+                    phase: .failed,
+                    message: "Host action pipeline is unavailable"
+                )
+                return
+            }
             do {
                 try await actionPipeline.setHeldKey(key, pressed: pressed)
+                self.lastKeyDelivery = .init(
+                    source: source,
+                    deviceEvent: pressed ? "down" : "up",
+                    target: key,
+                    phase: .hostEventSubmitted,
+                    message: nil
+                )
             } catch {
                 let message = Self.actionFailureLabel(error)
                 self.lastActionResult = "Failed — \(message)"
                 self.diagnosticMessage = "Held key \(key) failed: \(message)"
+                self.lastKeyDelivery = .init(
+                    source: source,
+                    deviceEvent: pressed ? "down" : "up",
+                    target: key,
+                    phase: .failed,
+                    message: message
+                )
             }
         }
     }
@@ -1547,6 +1647,15 @@ final class AppModel: ObservableObject {
             return "Completed"
         case .command(let command):
             return "Command exited with status \(command.exitStatus)"
+        }
+    }
+
+    private static func deviceEventLabel(_ event: DeviceKeyEvent) -> String {
+        switch event {
+        case .down: "down"
+        case .up: "up"
+        case .click: "click"
+        case .disconnect: "disconnect"
         }
     }
 

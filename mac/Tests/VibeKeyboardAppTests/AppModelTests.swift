@@ -6,6 +6,15 @@ import VibeBoardKit
 @Suite("Production app model")
 @MainActor
 struct AppModelTests {
+    @Test func heldKeyCaptureRecognizesNamedModifierAndCharacterKeys() {
+        #expect(HeldKeyCapture.keyName(keyCode: 54, charactersIgnoringModifiers: nil) == "right_command")
+        #expect(HeldKeyCapture.keyName(keyCode: 48, charactersIgnoringModifiers: "\t") == "tab")
+        #expect(HeldKeyCapture.keyName(keyCode: 0, charactersIgnoringModifiers: "A") == "a")
+        #expect(HeldKeyCapture.keyName(keyCode: 71, charactersIgnoringModifiers: nil) == nil)
+        #expect(HeldKeyCapture.isPressedModifier(keyCode: 54, flags: [.command]))
+        #expect(!HeldKeyCapture.isPressedModifier(keyCode: 54, flags: []))
+    }
+
     @Test func publishesCurrentEpochCapabilitiesAndClearsOnDetach() async throws {
         let descriptor = testDescriptor()
         let monitor = TestMonitor()
@@ -149,6 +158,8 @@ struct AppModelTests {
         await eventually { await pipeline.eventCount() == 3 }
         #expect(await pipeline.eventCount() == 3)
         #expect(await pipeline.timestamps() == [10_000, 11_500, 11_501])
+        await eventually { model.lastKeyDelivery?.phase == .actionCompleted }
+        #expect(model.lastKeyDelivery?.source == .k1)
 
         session.send(.stateChanged(.disconnected))
         await eventually { await pipeline.resetCount() == 1 }
@@ -232,6 +243,8 @@ struct AppModelTests {
 
         await eventually { await pipeline.heldKeyEvents() == ["f2:down", "f2:up"] }
         #expect(await pipeline.eventCount() == 0)
+        await eventually { model.lastKeyDelivery?.phase == .hostEventSubmitted }
+        #expect(model.lastKeyDelivery?.target == "f2")
     }
 
     @Test func mappingsPersistOnlyThroughRepository() async throws {
