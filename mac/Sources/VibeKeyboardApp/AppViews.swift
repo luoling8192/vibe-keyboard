@@ -537,6 +537,7 @@ private struct KeysPage: View {
     @State private var shortcutFunction = false
     @State private var shortcutOption = false
     @State private var shortcutShift = false
+    @State private var heldKey = "right_command"
     @State private var commandExecutable = "/usr/bin/open"
     @State private var commandArguments = "-a\nTextEdit"
     @State private var commandTimeout = "5000"
@@ -580,7 +581,9 @@ private struct KeysPage: View {
 
                         Picker("Action", selection: actionChoice) {
                             ForEach(ActionChoice.allCases, id: \.self) { choice in
-                                Text(choice.label).tag(choice)
+                                Text(choice.label)
+                                    .tag(choice)
+                                    .disabled(choice == .holdKey && selectedGesture != .single)
                             }
                         }
                         .frame(maxWidth: 360)
@@ -600,6 +603,7 @@ private struct KeysPage: View {
                 }
                 HStack {
                     Button("Test selected action") { model.testAction(currentAction) }
+                        .disabled(currentAction.isHeldKey)
                     Button("Clear selected gesture") {
                         model.setAction(.none, for: model.selectedKey, gesture: selectedGesture)
                     }
@@ -639,6 +643,16 @@ private struct KeysPage: View {
                 model.setAction(.pasteText(textDraft), for: model.selectedKey, gesture: selectedGesture)
             }
             .disabled(textDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        case .holdKey:
+            TextField("Key (right_command, f2, space, a…)", text: $heldKey)
+                .frame(maxWidth: 320)
+            Button("Apply held key") {
+                model.setAction(.holdKey(heldKey), for: model.selectedKey, gesture: selectedGesture)
+            }
+            .disabled(!heldKeyIsValid)
+            Text("The selected key is held while the physical button is down. Use left_command, right_command, left_shift, right_shift, left_option, right_option, left_control, right_control, fn, a–z, 0–9, F1–F20, space, arrows, or return.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .customShortcut:
             TextField("Key (1, fn, f1…f20, home, pageup)", text: $shortcutKey)
                 .frame(maxWidth: 240)
@@ -713,6 +727,10 @@ private struct KeysPage: View {
         ProductionHostActionAdapter.keyCode(forShortcutKey: shortcutKey) != nil
     }
 
+    private var heldKeyIsValid: Bool {
+        ProductionHostActionAdapter.supportsHeldKey(heldKey)
+    }
+
     private var commandIsValid: Bool {
         commandExecutable.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") &&
         UInt32(commandTimeout).map { $0 > 0 && $0 <= 300_000 } == true
@@ -750,6 +768,8 @@ private struct KeysPage: View {
             shortcutFunction = shortcut.modifiers.contains(.function)
             shortcutOption = shortcut.modifiers.contains(.option)
             shortcutShift = shortcut.modifiers.contains(.shift)
+        case .holdKey(let key):
+            heldKey = key
         case .customCommand(let command):
             commandExecutable = command.executable
             commandArguments = command.arguments.joined(separator: "\n")
@@ -764,7 +784,7 @@ private struct KeysPage: View {
 
 private enum ActionChoice: String, CaseIterable, Hashable {
     case none, voice, enter, copy, interrupt, wake, paste, shortcut, command, launch
-    case screenImage, screenDashboard, dashboardNextPage, dashboardNextStocks
+    case holdKey, screenImage, screenDashboard, dashboardNextPage, dashboardNextStocks
 
     init(_ action: HostAction) {
         switch action {
@@ -774,6 +794,7 @@ private enum ActionChoice: String, CaseIterable, Hashable {
         case .interruptControlC: self = .interrupt
         case .wakeApplication: self = .wake
         case .pasteText: self = .paste
+        case .holdKey: self = .holdKey
         case .customShortcut: self = .shortcut
         case .customCommand: self = .command
         case .launchApplication: self = .launch
@@ -795,6 +816,7 @@ private enum ActionChoice: String, CaseIterable, Hashable {
         case .interrupt: "Interrupt"
         case .wake: "Wake application"
         case .paste: "Paste text"
+        case .holdKey: "Hold single key"
         case .shortcut: "Custom shortcut"
         case .command: "Run command"
         case .launch: "Launch application"
@@ -814,6 +836,7 @@ private enum ActionChoice: String, CaseIterable, Hashable {
         case .interrupt: .interruptControlC
         case .wake: .wakeApplication
         case .paste: .pasteText("Text")
+        case .holdKey: .holdKey("right_command")
         case .shortcut:
             (try? VibeBoardKit.KeyboardShortcut(modifiers: [.command], key: "k"))
                 .map { .customShortcut($0) } ?? .none
@@ -826,6 +849,13 @@ private enum ActionChoice: String, CaseIterable, Hashable {
         case .dashboardNextPage: .dashboardNextPage
         case .dashboardNextStocks: .dashboardNextStocks
         }
+    }
+}
+
+private extension HostAction {
+    var isHeldKey: Bool {
+        if case .holdKey = self { return true }
+        return false
     }
 }
 

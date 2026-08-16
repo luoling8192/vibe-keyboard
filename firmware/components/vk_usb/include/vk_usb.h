@@ -514,6 +514,52 @@ typedef struct {
     void *context;
 } vk_usb_transport_ops_t;
 
+/*
+ * PCM source consumed by the USB Audio Class microphone interface. The source
+ * owns microphone/I2S arbitration; USB fills silence whenever start/read is
+ * temporarily unavailable so the isochronous endpoint remains well formed.
+ */
+typedef struct {
+    esp_err_t (*start)(void *context);
+    esp_err_t (*read)(void *context, uint8_t *bytes, size_t capacity,
+                      size_t *read_bytes);
+    void (*stop)(void *context);
+    void *context;
+} vk_usb_uac_source_registration_t;
+
+/* Read-only counters used to locate failures between the PDM driver, the PCM
+ * ring, and the USB Audio Class consumer. They are intentionally not a logging
+ * transport and expose no raw microphone samples. */
+typedef struct {
+    uint32_t source_start_attempts;
+    uint32_t source_starts;
+    uint32_t source_start_failures;
+    uint32_t source_stops;
+    uint32_t i2s_reads;
+    uint32_t i2s_read_bytes;
+    uint32_t i2s_timeouts;
+    uint32_t i2s_errors;
+    uint32_t published_samples;
+    uint32_t latest_peak;
+    uint32_t uac_reads;
+    uint32_t uac_consumed_bytes;
+    uint32_t uac_underflow_bytes;
+    uint32_t ring_bytes;
+    bool source_active;
+    bool i2s_initialized;
+    bool i2s_enabled;
+    int32_t last_source_start_error;
+    int32_t last_i2s_error;
+} vk_usb_audio_diagnostics_t;
+
+typedef esp_err_t (*vk_usb_audio_diagnostics_getter_t)(
+    void *context, uint32_t expected_epoch,
+    vk_usb_audio_diagnostics_t *diagnostics);
+typedef struct {
+    vk_usb_audio_diagnostics_getter_t get_snapshot;
+    void *context;
+} vk_usb_audio_diagnostics_provider_registration_t;
+
 typedef struct {
     const char *hardware;
     const char *firmware_version;
@@ -555,6 +601,7 @@ size_t vk_usb_service_parser_steps_for_test(vk_usb_service_t *);
 
 /* Typed integration only. No function accepts an arbitrary frame type, JSON body, or byte body. */
 esp_err_t vk_usb_service_register_capability_provider(vk_usb_service_t *, const vk_usb_capability_provider_registration_t *);
+esp_err_t vk_usb_service_register_audio_diagnostics_provider(vk_usb_service_t *, const vk_usb_audio_diagnostics_provider_registration_t *);
 esp_err_t vk_usb_service_register_asset_handler(vk_usb_service_t *, const vk_usb_asset_handler_registration_t *);
 esp_err_t vk_usb_service_register_screen_handler(vk_usb_service_t *, const vk_usb_screen_handler_registration_t *);
 esp_err_t vk_usb_service_register_widget_handler(vk_usb_service_t *, const vk_usb_widget_handler_registration_t *);
@@ -589,10 +636,12 @@ esp_err_t vk_usb_register_input_handler(const vk_usb_input_handler_registration_
 esp_err_t vk_usb_register_input_lifecycle(const vk_usb_input_lifecycle_registration_t *);
 esp_err_t vk_usb_register_led_lifecycle(const vk_usb_led_lifecycle_registration_t *);
 esp_err_t vk_usb_register_capability_provider(const vk_usb_capability_provider_registration_t *);
+esp_err_t vk_usb_register_audio_diagnostics_provider(const vk_usb_audio_diagnostics_provider_registration_t *);
 esp_err_t vk_usb_register_asset_handler(const vk_usb_asset_handler_registration_t *);
 esp_err_t vk_usb_register_screen_handler(const vk_usb_screen_handler_registration_t *);
 esp_err_t vk_usb_register_widget_handler(const vk_usb_widget_handler_registration_t *);
 esp_err_t vk_usb_register_led_handler(const vk_usb_led_handler_registration_t *);
+esp_err_t vk_usb_register_uac_source(const vk_usb_uac_source_registration_t *);
 vk_usb_handoff_result_t vk_usb_send_button(uint32_t expected_epoch, const vk_usb_button_event_t *);
 esp_err_t vk_usb_send_input_state(uint32_t expected_epoch, vk_usb_input_mode_t, vk_usb_key_t);
 esp_err_t vk_usb_send_input_error(uint32_t expected_epoch, vk_usb_input_error_t);

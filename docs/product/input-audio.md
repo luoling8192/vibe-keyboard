@@ -266,7 +266,17 @@ Accepted `interaction_mode` or `voice_key` commands reply with exact `{"event":"
 
 ## Recording Lifecycle
 
-The device configures I2S0 PDM RX at 16 kHz with two 16-bit slots on GPIO41 clock/GPIO40 data, feeds Espressif AFE using input format `MM`, selects the processed mono PCM output, encodes Opus, and mirrors framed packets over USB. The two slots do not by themselves prove the physical microphone count. The host does not receive USB Audio Class PCM.
+The device configures I2S0 PDM RX at 16 kHz with two 16-bit slots on GPIO41
+clock/GPIO40 data. A UAC2 session bypasses the speech AFE, chooses the slot with
+greater absolute sample energy for each capture block, and exposes that raw
+PDM-to-PCM result as 16 kHz, 16-bit mono audio. This avoids making the system
+microphone depend on speech-processing startup and handles either PDM L/R slot
+strapping. A legacy voice-key session instead feeds both slots to Espressif AFE
+using input format `MM`, encodes the processed mono result as Opus, and sends
+framed packets over CDC. The two consumers are explicitly mutually exclusive;
+a UAC endpoint underflow is filled with silence rather than malformed or short
+isochronous data. The two I2S slots do not by themselves prove the physical
+microphone count.
 
 Host UI state commands drive the vendor recording interaction:
 
@@ -300,6 +310,8 @@ The target dependencies are pinned for ESP-IDF 5.5.2 and ESP32-S3 in `firmware/d
 |---|---:|---|---|---|
 | `espressif/esp-sr` | `2.1.4` | `3903f0880cc3065765bd4038e01cbfa7907c8052ecf0a4f7a70c4444a26c1737` | `85a1c634325cecf99377e6fdb385b03a5c3363ce` | ESPRESSIF MIT, restricted to Espressif products |
 | `esphome/micro-opus` | `0.4.1` | `c4cec51b6e45b9b660bf8725a10c65f46485ff8b37ff664e4da3fd738301c71e` | `8354085908683c6130e32a832aeec8a7ca115c51` | Apache-2.0 wrapper; BSD-style upstream Opus and patches |
+| `espressif/tinyusb` | `0.19.0~3` | `a40b7f67df6ac254a4afd96c6401cc56f2059ae747d6d7e66b568bca53ad0edc` | registry source | MIT |
+| `espressif/usb_device_uac` | `1.3.1` | `e4665bee61baaee5e06acae662438ffd5ad794ce6d44b10c30173e9940b80896` | registry source | Apache-2.0 component; TinyUSB descriptor portions retain MIT notices |
 
 The ESP-SR 2.1.4 named AFE interface is `esp_afe_handle_from_config`, followed by `create_from_config`, `destroy`, `reset_buffer`, `feed`, `fetch`, `get_feed_chunksize`, `get_fetch_chunksize`, `get_channel_num`, `get_feed_channel_num`, `get_fetch_channel_num`, and `get_samp_rate`. Configuration starts with `afe_config_init("MM", NULL, AFE_TYPE_SR, AFE_MODE_HIGH_PERF)` and uses named `afe_config_t` fields only: `aec_init`, `se_init`, `vad_init`, `wakenet_init`, `agc_init`, `memory_alloc_mode`, `afe_perferred_core`, `afe_perferred_priority`, `afe_ringbuf_size`, `afe_linear_gain`, and `debug_init`. The candidate fields `voice_communication_init`, `voice_communication_agc_init`, and `voice_communication_agc_gain` do not exist in the ESP32-S3 2.1.4 `afe_config_t`; they must not be invented or accessed through private offsets. `"MM"` contains no playback/reference channel, and the null model list plus disabled WakeNet/VAD means production version 1 loads no speech model list. Private `afe_config_t` offsets are forbidden.
 
@@ -321,6 +333,7 @@ Verified capture and encoder configuration:
 ```text
 I2S controller: I2S0 PDM RX master
 PDM input: 16000 Hz, 16-bit stereo/both slots, GPIO41 clock/GPIO40 data
+UAC conversion: direct I2S PCM, louder slot per capture block, 16-bit mono
 DMA: 4 descriptors × 512 frames
 AFE input format: MM; runtime feed/fetch chunk sizes queried from the AFE interface
 microphone ring: 64000 bytes
@@ -335,9 +348,9 @@ signal: OPUS_SIGNAL_VOICE
 samples per packet: 960
 packet duration: 60 ms
 maximum encoded packet: 220 bytes
-AFE feed task: stack 8192, priority 20, core 0
-AFE fetch task: stack 8192, priority 18, core 0
-audio pipeline task: stack 32768, priority 5, core 0
+legacy Opus AFE feed task: stack 8192, priority 20, core 0
+legacy Opus AFE fetch task: stack 8192, priority 18, core 0
+audio pipeline task: stack 16384, priority 5, core 0
 bounded worker join: approximately 1500 ms before straggler deletion
 ```
 

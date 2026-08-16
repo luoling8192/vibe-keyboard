@@ -9,7 +9,8 @@ Status: Partially verified from device descriptors, boot logs, and connected val
 | USB vendor | Espressif | USB descriptor |
 | VID | `0x303a` | USB descriptor |
 | PID | `0x1001` | USB descriptor |
-| Product | USB JTAG/serial debug unit | USB descriptor |
+| Vendor/ROM product | USB JTAG/serial debug unit | connected USB descriptor |
+| Replacement application product | VibeBoard Microphone + Control (CDC + UAC2) | source/build contract; physical enumeration pending |
 | Observed serial | `02:00:00:00:00:01` | USB descriptor |
 | Normalized device ID | `020000000001` | vendor app normalization |
 | Current macOS path | `/dev/cu.usbmodemXXXX` | device enumeration; path is not stable |
@@ -26,7 +27,7 @@ Status: Partially verified from device descriptors, boot logs, and connected val
 | LVGL | major version 9 | firmware components/strings |
 | Microphone bus | I2S0 PDM RX, GPIO41 clock, GPIO40 data, two 16-bit slots | firmware channel/config construction |
 | Audio sample rate | 16 kHz | firmware constants and vendor Ogg Opus muxer |
-| Host audio codec | AFE-processed mono Opus | vendor pipeline, `AudioFrame` parser and Ogg Opus muxer |
+| Host audio formats | 16 kHz/16-bit/mono UAC2 PCM plus legacy AFE-processed mono Opus sessions | replacement source/build contract; connected UAC validation pending |
 | LEDs | one GPIO8 SK6812/GRB chain: 4 key LEDs + 13 strip LEDs | firmware configuration and boot log |
 
 ## Verified Display Bus
@@ -78,11 +79,17 @@ RMT DMA and output inversion are disabled. Vendor state animation refreshes ever
 
 ## USB-Only Product Contract
 
-The product uses the ESP32-S3 built-in USB Serial/JTAG CDC callout for all host communication.
+The replacement application software-switches the internal USB PHY to USB OTG
+device mode and exposes a composite device: CDC carries the existing framed
+control protocol and UAC2 exposes the microphone as 16 kHz, 16-bit mono PCM.
+The ROM download path remains USB Serial/JTAG because no USB PHY eFuse or
+bootloader is changed.
 
 The macOS client and firmware operate completely over USB and expose no Bluetooth or Wi-Fi dependency or fallback.
 
-Audio is custom Opus frames over the USB serial protocol, not USB Audio Class.
+Legacy button-triggered recordings remain custom Opus frames over CDC. UAC is a
+second host-facing path and is mutually exclusive with a legacy Opus capture
+session; opening UAC never disables screen, key, LED, asset, or widget CDC use.
 
 ## Flash Layout
 

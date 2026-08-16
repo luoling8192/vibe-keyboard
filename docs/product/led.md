@@ -16,7 +16,10 @@ Until separately authorized physical calibration and current-budget evidence pro
 
 ## Transport and Capability
 
-LED control is a replacement-protocol feature carried only by the ESP32-S3 built-in USB Serial/JTAG service. Bluetooth, BLE, Wi-Fi, network, TinyUSB, USB OTG CDC, and USB Audio Class are prohibited transports or fallbacks.
+LED control is a replacement-protocol feature carried only by the CDC interface
+of the ESP32-S3 TinyUSB composite device. Bluetooth, BLE, Wi-Fi, network, USB
+host mode, and any second fallback transport are prohibited. The companion UAC
+microphone interface does not own or mutate LED state.
 
 `led` is an independent key in the complete current-epoch `vk_capabilities.features` object. It does not depend on `assets` or `screen`, and neither feature may supply or override LED limits. Capability snapshots follow the atomic whole-snapshot replacement rules in `usb-protocol.md`.
 

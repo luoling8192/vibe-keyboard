@@ -61,6 +61,7 @@ public actor InertDiagnosticActionAdapter: PermissionAuthorizing, InputInjecting
     public func interruptControlC() async throws { throw ConnectedDiagnosticError.unexpectedAction("interruptControlC") }
     public func pasteText(_ text: String) async throws { throw ConnectedDiagnosticError.unexpectedAction("pasteText") }
     public func sendShortcut(_ shortcut: KeyboardShortcut) async throws { throw ConnectedDiagnosticError.unexpectedAction("shortcut") }
+    public func setHeldKey(_ key: String, pressed: Bool) async throws { throw ConnectedDiagnosticError.unexpectedAction("heldKey") }
     public func wakeApplication() async throws { throw ConnectedDiagnosticError.unexpectedAction("wakeApplication") }
     public func launchApplication(bundleIdentifier: String) async throws { throw ConnectedDiagnosticError.unexpectedAction("launchApplication") }
     public func toggleVoiceInput() async throws { throw ConnectedDiagnosticError.unexpectedAction("voiceInput") }

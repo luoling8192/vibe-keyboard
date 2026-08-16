@@ -105,4 +105,5 @@ typedef enum {
 } vk_audio_native_resource_t;
 void vk_audio_native_resource_allocated(vk_audio_native_resource_t resource);
 void vk_audio_native_resource_freed(vk_audio_native_resource_t resource);
+void vk_audio_native_started(void);
 void vk_audio_native_stop_requested(void);

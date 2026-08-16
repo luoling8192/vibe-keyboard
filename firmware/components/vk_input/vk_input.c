@@ -333,6 +333,13 @@ static void consume_result(audio_result_t result)
 
 static void process_transition(vk_input_transition_t value)
 {
+#if defined(ESP_PLATFORM) || defined(VK_INPUT_STANDARD_MICROPHONE_TEST)
+    /* UAC is the sole audio path in production. Physical keys remain ordinary
+     * control events so the host can map them to push-to-talk shortcuts while
+     * macOS reads the standard VibeBoard microphone independently. */
+    (void)handoff(value, false);
+    return;
+#else
     bool voice=value.key==(vk_input_key_t)s_input.voice_key;
     if(!voice||s_input.voice_disabled){if(!voice)(void)handoff(value,false);return;}
     if(s_input.mode==VK_USB_INPUT_MODE_HOLD_TO_TALK){
@@ -344,6 +351,7 @@ static void process_transition(vk_input_transition_t value)
         bool active=s_input.voice==VOICE_RUNNING;if(!handoff(value,active))return;
         if(value.kind==VK_INPUT_TRANSITION_CLICK){if(active){s_input.voice=VOICE_STOPPING;(void)submit_audio(AUDIO_STOP,s_input.session);}else if(s_input.voice==VOICE_IDLE){s_input.voice=VOICE_PREPARING;(void)submit_audio(AUDIO_PREPARE,0U);}}
     }
+#endif
 }
 
 static void reset_owner_for_barrier(uint32_t barrier)

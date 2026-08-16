@@ -20,6 +20,9 @@ APP_MAIN = (ROOT / "main/app_main.c").read_text()
 USB_HEADER = (ROOT / "components/vk_usb/include/vk_usb.h").read_text()
 USB_SERVICE = (ROOT / "components/vk_usb/vk_usb_service.c").read_text()
 USB_PRODUCTION = (ROOT / "components/vk_usb/vk_usb.c").read_text()
+USB_TINYUSB = (ROOT / "components/vk_usb/vk_usb_tinyusb.c").read_text()
+USB_DESCRIPTORS = (ROOT / "components/vk_usb/vk_usb_descriptors.c").read_text()
+USB_COMPONENT_MANIFEST = (ROOT / "components/vk_usb/idf_component.yml").read_text()
 INPUT = (ROOT / "components/vk_input/vk_input.c").read_text()
 ASSET_STORE = (ROOT / "components/vk_assets/vk_asset_store.c").read_text()
 SCREEN = (ROOT / "components/vk_screen/vk_screen.c").read_text()
@@ -299,6 +302,8 @@ class HardwareContractTests(unittest.TestCase):
         self.assertIn('"#define CONFIG_SPIRAM_XIP_FROM_PSRAM 1"', AUTO_FLASH)
         self.assertIn('"#define CONFIG_SPIFFS_OBJ_NAME_LEN 96"', VALIDATE_BUILD)
         self.assertIn('"#define CONFIG_SPIFFS_OBJ_NAME_LEN 96"', AUTO_FLASH)
+        self.assertIn('"#define CONFIG_USB_DEVICE_UAC_AS_PART 1"', AUTO_FLASH)
+        self.assertIn('"#define CONFIG_UAC_SAMPLE_RATE 16000"', AUTO_FLASH)
         self.assertIn('probe_device(port, "no_reset")', AUTO_FLASH)
         self.assertIn('probe_device(port, "default_reset")', AUTO_FLASH)
         self.assertIn('"--before", "no_reset", "--after", "watchdog_reset"', AUTO_FLASH)
@@ -380,16 +385,24 @@ class HardwareContractTests(unittest.TestCase):
     def test_replacement_usb_service_is_typed_bounded_and_production_wired(self):
         for item in [
             "VK_USB_MAX_FRAME_BYTES 4096U", "VK_USB_LEASE_MS 5000U",
-            "usb_serial_jtag_driver_install", "usb_serial_jtag_read_bytes",
-            "usb_serial_jtag_write_bytes", "vk_usb_service_poll",
+            "vk_usb_tinyusb_connect", "tud_cdc_n_read",
+            "tud_cdc_n_write", "uac_device_init", "TUD_AUDIO_DESCRIPTOR",
+            "vk_usb_service_poll",
             "vk_usb_start()", "vk_usb_stop()",
         ]:
-            self.assertIn(item, USB_HEADER + USB_SERVICE + USB_PRODUCTION + APP_MAIN)
+            self.assertIn(item, USB_HEADER + USB_SERVICE + USB_PRODUCTION + USB_TINYUSB + USB_DESCRIPTORS + APP_MAIN)
         for item in [
-            "tinyusb", "tud_", "esp_wifi", "esp_bt", "socket(", "httpd_",
+            "esp_wifi", "esp_bt", "socket(", "httpd_",
             "provision_handler", "voice_gain_handler", "raw_frame",
         ]:
             self.assertNotIn(item, USB_HEADER + USB_SERVICE + USB_PRODUCTION)
+        for item in [
+            "CONFIG_USB_DEVICE_UAC_AS_PART=y", "CONFIG_UAC_SPEAKER_CHANNEL_NUM=0",
+            "CONFIG_UAC_MIC_CHANNEL_NUM=1", "CONFIG_UAC_SAMPLE_RATE=16000",
+            "CONFIG_UAC_SUPPORT_MACOS=y",
+        ]:
+            self.assertIn(item, SDK_DEFAULTS)
+        self.assertIn('espressif/usb_device_uac: "1.3.1"', USB_COMPONENT_MANIFEST)
         for item in [
             "CONFIG_ESP_CONSOLE_NONE=y", "CONFIG_ESP_CONSOLE_SECONDARY_NONE=y",
             "CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y", "CONFIG_LOG_DEFAULT_LEVEL_NONE=y",
@@ -406,7 +419,10 @@ class HardwareContractTests(unittest.TestCase):
             "CONFIG_BT_ENABLED=n",
         ]:
             self.assertIn(item, SDK_DEFAULTS)
-        for item in ["version: 5.5.2", "version: 2.8.0~1", "version: 3.0.3", "version: 9.5.0"]:
+        for item in [
+            "version: 5.5.2", "version: 2.8.0~1", "version: 3.0.3",
+            "version: 9.5.0", "version: 0.19.0~3", "version: 1.3.1",
+        ]:
             self.assertIn(item, LOCK)
 
     def test_input_audio_contract_closes_owner_epoch_and_ordering_gaps(self):
@@ -451,7 +467,7 @@ class HardwareContractTests(unittest.TestCase):
             "`old_epoch == 0` is legal only for first new-epoch and pre-epoch stopping",
             "A zero `proposed_epoch` remains required for normal lease expiry and stopping when `old_epoch` is nonzero",
             "`ack_linearization_time < absolute_deadline`",
-            "ESP32-S3 built-in USB Serial/JTAG only",
+            "single TinyUSB composite device",
         ]:
             self.assertIn(item, USB_PROTOCOL_CONTRACT)
 
@@ -692,7 +708,7 @@ class LEDContractTests(unittest.TestCase):
             "participant-specific one-item acknowledgement sink",
             "same monotonic absolute 3,250 ms transition deadline",
             "LED `TAINTED`, begin failure, or timeout permanently taints/closes that USB composition",
-            "Bluetooth, BLE, Wi-Fi, network, TinyUSB, USB OTG CDC, and USB Audio Class are prohibited",
+            "Bluetooth, BLE, Wi-Fi, network, USB host mode, and any second fallback transport are prohibited",
             "`vk_led` is the sole LED state and animation owner",
             "complete 17-pixel logical-RGB frame",
         ]:

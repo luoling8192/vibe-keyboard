@@ -5,12 +5,15 @@ ESP-IDF 5.5.2 firmware for the ESP32-S3 VibeBoard hardware profile:
 - NV3007 428×142 RGB565 display;
 - static and animated VKA1 assets, text, widgets, and pet scenes;
 - four active-low physical keys;
-- USB Serial/JTAG control protocol;
-- PDM microphone to Opus audio;
+- composite USB OTG device: CDC control protocol plus UAC2 microphone;
+- PDM microphone to direct UAC PCM or legacy AFE/Opus audio;
 - fail-dark SK6812 LED ownership;
 - 16 MiB flash and 8 MiB octal PSRAM.
 
-Bluetooth, Wi-Fi, network services, TinyUSB, and USB Audio Class are excluded.
+Bluetooth, Wi-Fi, and network services are excluded. TinyUSB exposes one CDC
+interface for the existing framed protocol and one 16 kHz mono UAC2 input.
+The legacy button-triggered Opus recorder remains available while the UAC
+microphone is not open; the two consumers are deliberately mutually exclusive.
 
 ## Build and test
 

@@ -58,6 +58,13 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
         try postKey(code: code, flags: Self.flags(for: shortcut.modifiers))
     }
 
+    func setHeldKey(_ key: String, pressed: Bool) async throws {
+        guard let definition = Self.heldKeyDefinition(for: key) else {
+            throw ProductionActionError.unsupported("held key \(key)")
+        }
+        try postHeldKey(definition, pressed: pressed)
+    }
+
     func wakeApplication() async throws {
         await MainActor.run { NSApp.activate(ignoringOtherApps: true) }
     }
@@ -107,12 +114,35 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
         up.post(tap: .cghidEventTap)
     }
 
+    private func postHeldKey(_ definition: HeldKeyDefinition, pressed: Bool) throws {
+        guard let event = CGEvent(keyboardEventSource: nil, virtualKey: definition.code, keyDown: pressed) else {
+            throw ProductionActionError.eventCreationFailed
+        }
+        // A modifier's virtual key code distinguishes its left and right variants.
+        // Setting `.maskCommand`/`.maskShift` here only describes generic modifier
+        // state and can cause the injected event to lose that distinction.
+        event.flags = []
+        event.post(tap: .cghidEventTap)
+    }
+
     static func keyCode(forShortcutKey key: String) -> CGKeyCode? {
         let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if normalized.unicodeScalars.count == 1, let scalar = normalized.unicodeScalars.first {
             return characterKeyCodes[scalar]
         }
         return namedKeyCodes[normalized]
+    }
+
+    static func supportsHeldKey(_ key: String) -> Bool {
+        heldKeyDefinition(for: key) != nil
+    }
+
+    private static func heldKeyDefinition(for key: String) -> HeldKeyDefinition? {
+        let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let code = keyCode(forShortcutKey: normalized) {
+            return .init(code: code)
+        }
+        return heldModifierKeys[normalized]
     }
 
     static func flags(for modifiers: Set<KeyboardShortcut.Modifier>) -> CGEventFlags {
@@ -146,18 +176,35 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
         "f13": 105, "f14": 107, "f15": 113, "f16": 106,
         "f17": 64, "f18": 79, "f19": 80, "f20": 90,
     ]
+
+    private struct HeldKeyDefinition {
+        let code: CGKeyCode
+    }
+
+    private static let heldModifierKeys: [String: HeldKeyDefinition] = [
+        "left_command": .init(code: 55),
+        "right_command": .init(code: 54),
+        "left_shift": .init(code: 56),
+        "right_shift": .init(code: 60),
+        "left_option": .init(code: 58),
+        "right_option": .init(code: 61),
+        "left_control": .init(code: 59),
+        "right_control": .init(code: 62),
+    ]
 }
 
 protocol AppActionRouting: Sendable {
     func updateProfile(_ profile: KeyMappingProfile) async throws
     func consume(_ event: DeviceKeyEvent, at timestampMilliseconds: UInt64) async throws -> [ActionExecutionResult]
     func execute(_ action: HostAction) async throws -> ActionExecutionResult
+    func setHeldKey(_ key: String, pressed: Bool) async throws
     func disconnect(at timestampMilliseconds: UInt64) async throws
 }
 
 actor AppGestureActionPipeline: AppActionRouting {
     private var gestures: GestureRouter
     private let actions: KeyActionRouter
+    private var heldKeys: [String: Int] = [:]
 
     init(profile: KeyMappingProfile, adapter: ProductionHostActionAdapter) throws {
         gestures = GestureRouter(policy: try GesturePolicy(
@@ -192,7 +239,27 @@ actor AppGestureActionPipeline: AppActionRouting {
         try await actions.execute(action)
     }
 
+    func setHeldKey(_ key: String, pressed: Bool) async throws {
+        let current = heldKeys[key, default: 0]
+        if pressed {
+            if current == 0 { try await actions.setHeldKey(key, pressed: true) }
+            heldKeys[key] = current + 1
+            return
+        }
+        guard current > 0 else { return }
+        if current == 1 {
+            try await actions.setHeldKey(key, pressed: false)
+            heldKeys.removeValue(forKey: key)
+        } else {
+            heldKeys[key] = current - 1
+        }
+    }
+
     func disconnect(at timestampMilliseconds: UInt64) async throws {
+        for key in heldKeys.keys {
+            try await actions.setHeldKey(key, pressed: false)
+        }
+        heldKeys.removeAll(keepingCapacity: true)
         _ = try gestures.handle(.disconnect, at: timestampMilliseconds)
     }
 }

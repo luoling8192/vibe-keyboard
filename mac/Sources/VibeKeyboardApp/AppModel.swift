@@ -289,6 +289,10 @@ final class AppModel: ObservableObject {
     private var dashboardStockElapsedSeconds = 0
     private var dashboardStockOffset = 0
     private var activeDashboardPetAsset: UploadedAssetSummary?
+    private var modifierTask: Task<Void, Never>?
+    private var heldKeysBySource: [CanonicalKey: String] = [:]
+    private var suppressedHoldClicks: Set<CanonicalKey> = []
+    private var legacyK4HoldMapping = false
 
     init(
         monitor: any USBDeviceMonitoring,
@@ -326,6 +330,7 @@ final class AppModel: ObservableObject {
             petCatalog: ProductionPetCatalog()
         )
         let defaults = UserDefaults.standard
+        legacyK4HoldMapping = defaults.bool(forKey: "keys.k4HoldsRightCommand")
         stockSymbols = defaults.string(forKey: "dashboard.stockSymbols") ?? "sh000001"
         if let stored = defaults.string(forKey: "dashboard.modules") {
             let modules = stored.split(separator: ",")
@@ -363,6 +368,7 @@ final class AppModel: ObservableObject {
         sessionTask?.cancel()
         operationTask?.cancel()
         dashboardTask?.cancel()
+        modifierTask?.cancel()
         petCatalogTask?.cancel()
     }
 
@@ -372,7 +378,15 @@ final class AppModel: ObservableObject {
         monitorTask = Task { [weak self, monitor] in
             guard let self else { return }
             do {
-                self.keyProfile = try await self.mappingRepository.load()
+                var profile = try await self.mappingRepository.load()
+                if self.legacyK4HoldMapping {
+                    profile.mappings[.k4]?.single = .holdKey("right_command")
+                    try profile.validate()
+                    try await self.mappingRepository.save(profile)
+                    self.legacyK4HoldMapping = false
+                    UserDefaults.standard.removeObject(forKey: "keys.k4HoldsRightCommand")
+                }
+                self.keyProfile = profile
                 try await self.actionPipeline?.updateProfile(self.keyProfile)
             } catch {
                 self.diagnosticMessage = "Key mapping load failed: \(error)"
@@ -1160,6 +1174,10 @@ final class AppModel: ObservableObject {
     }
 
     func setAction(_ action: HostAction, for key: CanonicalKey, gesture: KeyGesture) {
+        if case .holdKey = action, gesture != .single {
+            diagnosticMessage = "Hold single key can only be assigned to Click"
+            return
+        }
         var mappings = keyProfile.mappings
         if action == .voiceInput {
             for candidate in CanonicalKey.allCases {
@@ -1469,6 +1487,21 @@ final class AppModel: ObservableObject {
         default:
             return
         }
+        if case .up = deviceEvent, let heldKey = heldKeysBySource.removeValue(forKey: key) {
+            setHeldKey(heldKey, pressed: false)
+            return
+        }
+        if case .click = deviceEvent, suppressedHoldClicks.remove(key) != nil {
+            return
+        }
+        if case let .holdKey(heldKey)? = keyProfile.mappings[key]?.single {
+            if case .down = deviceEvent {
+                heldKeysBySource[key] = heldKey
+                suppressedHoldClicks.insert(key)
+                setHeldKey(heldKey, pressed: true)
+            }
+            return
+        }
         let timestamp = monotonicClock.nowMilliseconds()
         Task { [weak self] in
             guard let self, let actionPipeline else { return }
@@ -1479,6 +1512,21 @@ final class AppModel: ObservableObject {
                 let message = Self.actionFailureLabel(error)
                 self.lastActionResult = "Failed — \(message)"
                 self.diagnosticMessage = "Key action failed: \(message)"
+            }
+        }
+    }
+
+    private func setHeldKey(_ key: String, pressed: Bool) {
+        let previous = modifierTask
+        modifierTask = Task { [weak self] in
+            _ = await previous?.value
+            guard let self, let actionPipeline else { return }
+            do {
+                try await actionPipeline.setHeldKey(key, pressed: pressed)
+            } catch {
+                let message = Self.actionFailureLabel(error)
+                self.lastActionResult = "Failed — \(message)"
+                self.diagnosticMessage = "Held key \(key) failed: \(message)"
             }
         }
     }
@@ -1634,8 +1682,15 @@ final class AppModel: ObservableObject {
     }
 
     private func resetGestures() {
+        heldKeysBySource.removeAll(keepingCapacity: true)
+        suppressedHoldClicks.removeAll(keepingCapacity: true)
         let timestamp = monotonicClock.nowMilliseconds()
-        if let actionPipeline { Task { try? await actionPipeline.disconnect(at: timestamp) } }
+        let previous = modifierTask
+        modifierTask = Task { [weak self] in
+            _ = await previous?.value
+            guard let self, let actionPipeline else { return }
+            try? await actionPipeline.disconnect(at: timestamp)
+        }
     }
 
     private func updateCapabilities() {

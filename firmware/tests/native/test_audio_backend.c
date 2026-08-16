@@ -11,6 +11,7 @@ typedef enum {
     READ_ERROR,
     READ_OVERSIZE,
     READ_ODD,
+    READ_PARTIAL_TIMEOUT,
 } read_mode_t;
 
 typedef struct {
@@ -32,6 +33,12 @@ typedef struct {
     bool destroy_fail;
     size_t feed_bytes;
     size_t fetch_bytes;
+    size_t published_samples;
+    size_t published_nonzero_samples;
+    int16_t published_first_sample;
+    bool published_any;
+    int16_t raw_left_sample;
+    int16_t raw_right_sample;
 } fake_t;
 
 static esp_err_t next(fake_t *fake, void **handle)
@@ -48,15 +55,21 @@ static esp_err_t i2s_read(void *context, void *handle, uint8_t *bytes, size_t ca
 {
     (void)handle;
     fake_t *f = context;
-    if (f->read_mode == READ_TIMEOUT) return ESP_ERR_TIMEOUT;
+    if (f->read_mode == READ_TIMEOUT) { *count = 0U; return ESP_ERR_TIMEOUT; }
     if (f->read_mode == READ_ERROR) return ESP_FAIL;
     if (f->read_mode == READ_OVERSIZE) { *count = capacity + 2U; return ESP_OK; }
     if (f->read_mode == READ_ODD) { *count = 3U; return ESP_OK; }
     size_t length = f->read_index < f->read_count ? f->reads[f->read_index++] : 0U;
     assert(length <= capacity);
     memset(bytes, 0, length);
+    for (size_t offset = 0U; offset + (2U * sizeof(int16_t)) <= length;
+         offset += 2U * sizeof(int16_t)) {
+        memcpy(bytes + offset, &f->raw_left_sample, sizeof(int16_t));
+        memcpy(bytes + offset + sizeof(int16_t), &f->raw_right_sample,
+               sizeof(int16_t));
+    }
     *count = length;
-    return ESP_OK;
+    return f->read_mode == READ_PARTIAL_TIMEOUT ? ESP_ERR_TIMEOUT : ESP_OK;
 }
 static esp_err_t i2s_disable(void *context, void *handle)
 {
@@ -102,6 +115,20 @@ static bool afe_fetch(void *context, void *handle, vk_audio_backend_fetch_t *res
     return true;
 }
 static void afe_destroy(void *context, void *handle) { (void)handle; fake_t*f=context; f->cleanup[f->cleanups++]=3; }
+static esp_err_t publish_pcm(void *context, const int16_t *samples, size_t count)
+{
+    assert(samples != NULL);
+    fake_t *f = context;
+    if (count != 0U && !f->published_any) {
+        f->published_first_sample = samples[0];
+        f->published_any = true;
+    }
+    for (size_t index = 0U; index < count; ++index) {
+        if (samples[index] != 0) ++f->published_nonzero_samples;
+    }
+    f->published_samples += count;
+    return ESP_OK;
+}
 static esp_err_t opus_create(void *context, void **handle) { return next(context, handle); }
 static int opus_encode(void *context, void *handle, const int16_t *samples, size_t count, uint8_t *packet, size_t capacity)
 { (void)handle;(void)samples;(void)count;(void)packet;(void)capacity; return ((fake_t*)context)->encode; }
@@ -114,16 +141,20 @@ static esp_err_t send_frame(void *context, uint32_t session, uint32_t sequence, 
 
 static vk_audio_backend_ops_t ops(fake_t *fake)
 {
-    return (vk_audio_backend_ops_t){i2s_create,i2s_initialize,i2s_enable,i2s_read,
-        i2s_disable,i2s_destroy,afe_create,afe_feed,afe_fetch,afe_destroy,
-        opus_create,opus_encode,opus_destroy,allocate,deallocate,send_frame,fake};
+    return (vk_audio_backend_ops_t){
+        .i2s_create=i2s_create,.i2s_initialize=i2s_initialize,.i2s_enable=i2s_enable,
+        .i2s_read=i2s_read,.i2s_disable=i2s_disable,.i2s_destroy=i2s_destroy,
+        .afe_create=afe_create,.afe_feed=afe_feed,.afe_fetch=afe_fetch,
+        .afe_destroy=afe_destroy,.publish_pcm=publish_pcm,.opus_create=opus_create,
+        .opus_encode=opus_encode,.opus_destroy=opus_destroy,.allocate=allocate,
+        .deallocate=deallocate,.send=send_frame,.context=fake};
 }
 
 static void acquire_ok(fake_t *fake, vk_audio_backend_t *backend)
 {
     fake->encode=10;
     vk_audio_backend_ops_t operations=ops(fake);
-    assert(vk_audio_backend_acquire(backend,&operations,1)==ESP_OK);
+    assert(vk_audio_backend_acquire(backend,&operations,1,true)==ESP_OK);
 }
 
 int main(void)
@@ -132,7 +163,7 @@ int main(void)
         fake_t f={.fail_acquire_step=fail,.encode=10};
         vk_audio_backend_t b;
         vk_audio_backend_ops_t o=ops(&f);
-        assert(vk_audio_backend_acquire(&b,&o,1)!=ESP_OK);
+        assert(vk_audio_backend_acquire(&b,&o,1,true)!=ESP_OK);
         assert(vk_audio_backend_release(&b)==ESP_OK);
     }
 
@@ -141,6 +172,7 @@ int main(void)
     f.read_mode=READ_TIMEOUT; f.fetch_mode=1; f.fetch_repeats=2;
     assert(vk_audio_backend_capture(&b)==ESP_OK);
     assert(f.sends==2);
+    assert(f.published_samples==1920);
     assert(vk_audio_backend_finish(&b)==ESP_OK&&f.sends==3);
     assert(vk_audio_backend_release(&b)==ESP_OK);
     assert(f.cleanups==6);
@@ -159,6 +191,13 @@ int main(void)
     }
     f=(fake_t){.read_mode=READ_TIMEOUT,.fetch_mode=1,.fetch_repeats=1}; acquire_ok(&f,&b);
     assert(vk_audio_backend_capture(&b)==ESP_OK);
+    assert(vk_audio_backend_release(&b)==ESP_OK);
+
+    /* ESP-IDF can time out after copying valid DMA bytes; never discard them. */
+    f=(fake_t){.read_mode=READ_PARTIAL_TIMEOUT,.reads={16},.read_count=1,
+        .fetch_mode=1,.fetch_repeats=1};acquire_ok(&f,&b);
+    assert(vk_audio_backend_capture(&b)==ESP_OK);
+    assert(f.published_samples==960&&f.sends==1);
     assert(vk_audio_backend_release(&b)==ESP_OK);
 
     f=(fake_t){.feed_fail=true,.reads={16},.read_count=1}; acquire_ok(&f,&b);
@@ -181,6 +220,56 @@ int main(void)
         assert(vk_audio_backend_capture(&b)==send_error); assert(f.sends==1);
         assert(vk_audio_backend_release(&b)==ESP_OK);
     }
+
+    /* UAC-only capture bypasses AFE/Opus and selects the live stereo slot. */
+    f=(fake_t){.reads={16},.read_count=1,.raw_left_sample=0,.raw_right_sample=1234};
+    vk_audio_backend_ops_t system_ops=ops(&f);
+    system_ops.afe_create=NULL;system_ops.afe_feed=NULL;
+    system_ops.afe_fetch=NULL;system_ops.afe_destroy=NULL;
+    system_ops.opus_create=NULL;system_ops.opus_encode=NULL;
+    system_ops.opus_destroy=NULL;system_ops.send=NULL;
+    system_ops.allocate=NULL;system_ops.deallocate=NULL;
+    assert(vk_audio_backend_acquire(&b,&system_ops,9,false)==ESP_OK);
+    assert(vk_audio_backend_capture(&b)==ESP_OK);
+    assert(f.published_samples==4&&f.published_nonzero_samples==4);
+    assert(f.published_first_sample==1234&&f.sends==0&&b.opus==NULL);
+    assert(b.ring==NULL&&b.feed==NULL&&b.afe==NULL);
+    assert(vk_audio_backend_finish(&b)==ESP_OK);
+    assert(vk_audio_backend_release(&b)==ESP_OK);
+    assert(f.cleanups==2&&f.cleanup[0]==1&&f.cleanup[1]==4);
+
+    f=(fake_t){.read_mode=READ_PARTIAL_TIMEOUT,.reads={16},.read_count=1,
+        .raw_left_sample=-2222,.raw_right_sample=0};system_ops=ops(&f);
+    system_ops.afe_create=NULL;system_ops.afe_feed=NULL;
+    system_ops.afe_fetch=NULL;system_ops.afe_destroy=NULL;
+    system_ops.opus_create=NULL;system_ops.opus_encode=NULL;
+    system_ops.opus_destroy=NULL;system_ops.send=NULL;
+    system_ops.allocate=NULL;system_ops.deallocate=NULL;
+    assert(vk_audio_backend_acquire(&b,&system_ops,12,false)==ESP_OK);
+    assert(vk_audio_backend_capture(&b)==ESP_OK);
+    assert(f.published_samples==4&&f.published_nonzero_samples==4);
+    assert(f.published_first_sample==-2222);
+    assert(vk_audio_backend_release(&b)==ESP_OK);
+
+    f=(fake_t){.read_mode=READ_TIMEOUT};system_ops=ops(&f);
+    system_ops.afe_create=NULL;system_ops.afe_feed=NULL;
+    system_ops.afe_fetch=NULL;system_ops.afe_destroy=NULL;
+    system_ops.opus_create=NULL;system_ops.opus_encode=NULL;
+    system_ops.opus_destroy=NULL;system_ops.send=NULL;
+    system_ops.allocate=NULL;system_ops.deallocate=NULL;
+    assert(vk_audio_backend_acquire(&b,&system_ops,10,false)==ESP_OK);
+    assert(vk_audio_backend_capture(&b)==ESP_OK&&f.published_samples==0);
+    assert(vk_audio_backend_release(&b)==ESP_OK);
+
+    f=(fake_t){.reads={6},.read_count=1};system_ops=ops(&f);
+    system_ops.afe_create=NULL;system_ops.afe_feed=NULL;
+    system_ops.afe_fetch=NULL;system_ops.afe_destroy=NULL;
+    system_ops.opus_create=NULL;system_ops.opus_encode=NULL;
+    system_ops.opus_destroy=NULL;system_ops.send=NULL;
+    system_ops.allocate=NULL;system_ops.deallocate=NULL;
+    assert(vk_audio_backend_acquire(&b,&system_ops,11,false)==ESP_OK);
+    assert(vk_audio_backend_capture(&b)==ESP_ERR_INVALID_SIZE);
+    assert(vk_audio_backend_release(&b)==ESP_OK);
 
     f=(fake_t){.disable_fail=true}; acquire_ok(&f,&b);
     assert(vk_audio_backend_release(&b)==ESP_FAIL);

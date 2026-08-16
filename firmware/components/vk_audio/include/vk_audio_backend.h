@@ -33,6 +33,8 @@ typedef struct {
     int (*afe_feed)(void *context, void *handle, const int16_t *samples);
     bool (*afe_fetch)(void *context, void *handle, vk_audio_backend_fetch_t *result);
     void (*afe_destroy)(void *context, void *handle);
+    esp_err_t (*publish_pcm)(void *context, const int16_t *samples,
+                             size_t sample_count);
     esp_err_t (*opus_create)(void *context, void **handle);
     int (*opus_encode)(void *context, void *handle, const int16_t *samples,
                        size_t count, uint8_t *packet, size_t capacity);
@@ -56,12 +58,13 @@ typedef struct {
     bool i2s_enabled;
     void *afe;
     void *opus;
+    bool stream_opus;
     vk_audio_pipeline_t pipeline;
 } vk_audio_backend_t;
 
 esp_err_t vk_audio_backend_acquire(vk_audio_backend_t *backend,
                                     const vk_audio_backend_ops_t *ops,
-                                    uint32_t session_id);
+                                    uint32_t session_id, bool stream_opus);
 esp_err_t vk_audio_backend_capture(vk_audio_backend_t *backend);
 esp_err_t vk_audio_backend_finish(vk_audio_backend_t *backend);
 esp_err_t vk_audio_backend_release(vk_audio_backend_t *backend);

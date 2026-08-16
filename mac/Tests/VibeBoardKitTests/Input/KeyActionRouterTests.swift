@@ -142,6 +142,17 @@ struct KeyActionRouterTests {
         #expect(start.duration(to: clock.now) < .seconds(3))
     }
 
+    @Test func heldKeyUsesTheInputPermissionBoundary() async throws {
+        let services = Services()
+        let router = makeRouter(services: services)
+
+        try await router.setHeldKey("right_command", pressed: true)
+        try await router.setHeldKey("right_command", pressed: false)
+
+        #expect(Array(await services.events.suffix(2)) == [.heldKey("right_command", true), .heldKey("right_command", false)])
+        #expect(await services.permissionCount == 2)
+    }
+
     private func makeRouter(services: Services) -> KeyActionRouter {
         try! KeyActionRouter(
             profile: .vendorDefault(), permissions: services, input: services,
@@ -156,6 +167,7 @@ private enum ServiceEvent: Equatable, Sendable {
     case enter, copy, interrupt, wake, voice
     case paste(String)
     case shortcut(KeyboardShortcut)
+    case heldKey(String, Bool)
     case command(CommandSpecification)
     case launch(String)
     case screen(ScreenMode)
@@ -182,6 +194,7 @@ private actor Services: PermissionAuthorizing, InputInjecting, ApplicationContro
     func interruptControlC() { events.append(.interrupt) }
     func pasteText(_ text: String) { events.append(.paste(text)) }
     func sendShortcut(_ shortcut: KeyboardShortcut) { events.append(.shortcut(shortcut)) }
+    func setHeldKey(_ key: String, pressed: Bool) { events.append(.heldKey(key, pressed)) }
     func wakeApplication() { events.append(.wake) }
     func launchApplication(bundleIdentifier: String) { events.append(.launch(bundleIdentifier)) }
     func toggleVoiceInput() { events.append(.voice) }

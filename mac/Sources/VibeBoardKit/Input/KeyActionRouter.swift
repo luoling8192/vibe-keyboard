@@ -15,6 +15,7 @@ public protocol InputInjecting: Sendable {
     func interruptControlC() async throws
     func pasteText(_ text: String) async throws
     func sendShortcut(_ shortcut: KeyboardShortcut) async throws
+    func setHeldKey(_ key: String, pressed: Bool) async throws
 }
 
 public protocol ApplicationControlling: Sendable {
@@ -122,6 +123,8 @@ public actor KeyActionRouter {
             }
             try await requireInputPermission()
             try await input.pasteText(text)
+        case .holdKey:
+            return .noAction
         case let .customShortcut(shortcut):
             try await requireInputPermission()
             try await input.sendShortcut(shortcut)
@@ -145,6 +148,11 @@ public actor KeyActionRouter {
             try await screen.interactWithPet(interaction)
         }
         return .completed
+    }
+
+    public func setHeldKey(_ key: String, pressed: Bool) async throws {
+        try await requireInputPermission()
+        try await input.setHeldKey(key, pressed: pressed)
     }
 
     private func requireInputPermission() async throws {

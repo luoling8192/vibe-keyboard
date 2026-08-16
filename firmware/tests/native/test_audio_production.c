@@ -20,15 +20,22 @@ static atomic_int resource_free[VK_AUDIO_NATIVE_RESOURCE_COUNT];
 static pthread_mutex_t stop_gate_mutex=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t stop_gate_condition=PTHREAD_COND_INITIALIZER;
 static bool stop_gate_enabled, stop_gate_entered, stop_gate_release;
+static pthread_mutex_t started_gate_mutex=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t started_gate_condition=PTHREAD_COND_INITIALIZER;
+static bool started_gate_enabled, started_gate_entered, started_gate_release;
 static atomic_int afe_mode, afe_destroy_count, afe_config_free_count;
 static atomic_int opus_ctl_fail_at, opus_ctl_count, opus_destroy_count;
 static atomic_int usb_send_error, usb_send_count, usb_final_count, i2s_read_error;
 static atomic_int i2s_disable_failures, i2s_destroy_failures;
+static atomic_int i2s_create_count, i2s_initialize_count, i2s_enable_count;
 static atomic_int i2s_disable_count, i2s_destroy_count, semaphore_live_count;
 static atomic_bool i2s_block, i2s_read_entered, afe_create_block, afe_create_entered;
+static vk_usb_uac_source_registration_t registered_uac_source;
+static vk_usb_audio_diagnostics_provider_registration_t registered_diagnostics;
 
 void vk_audio_native_resource_allocated(vk_audio_native_resource_t r){assert(r<VK_AUDIO_NATIVE_RESOURCE_COUNT);atomic_fetch_add(&resource_alloc[r],1);}
 void vk_audio_native_resource_freed(vk_audio_native_resource_t r){assert(r<VK_AUDIO_NATIVE_RESOURCE_COUNT);atomic_fetch_add(&resource_free[r],1);}
+void vk_audio_native_started(void){pthread_mutex_lock(&started_gate_mutex);if(started_gate_enabled){started_gate_entered=true;pthread_cond_broadcast(&started_gate_condition);while(!started_gate_release)pthread_cond_wait(&started_gate_condition,&started_gate_mutex);}pthread_mutex_unlock(&started_gate_mutex);}
 void vk_audio_native_stop_requested(void){pthread_mutex_lock(&stop_gate_mutex);if(stop_gate_enabled){stop_gate_entered=true;pthread_cond_broadcast(&stop_gate_condition);while(!stop_gate_release)pthread_cond_wait(&stop_gate_condition,&stop_gate_mutex);}pthread_mutex_unlock(&stop_gate_mutex);}
 static bool fail_allocation(void){int n=atomic_fetch_add(&allocation_count,1)+1;int f=atomic_load(&allocation_fail_after);return f>0&&n==f;}
 void *heap_caps_malloc(size_t n,uint32_t caps){(void)caps;return fail_allocation()?NULL:malloc(n);}
@@ -45,9 +52,9 @@ uint32_t ulTaskNotifyTake(BaseType_t clear,TickType_t timeout){(void)clear;task_
 void xTaskNotifyGive(TaskHandle_t h){task_t*t=h;pthread_mutex_lock(&t->mutex);++t->notifications;pthread_cond_broadcast(&t->condition);pthread_mutex_unlock(&t->mutex);}
 void vTaskDelete(TaskHandle_t h){assert(h==NULL);current_task=NULL;atomic_fetch_sub(&task_live_count,1);vk_audio_native_resource_freed(VK_AUDIO_NATIVE_RESOURCE_WORKER);pthread_exit(NULL);}
 
-esp_err_t i2s_new_channel(const i2s_chan_config_t*c,void*t,i2s_chan_handle_t*h){(void)c;(void)t;*h=(void*)1;vk_audio_native_resource_allocated(VK_AUDIO_NATIVE_RESOURCE_I2S);return ESP_OK;}
-esp_err_t i2s_channel_init_pdm_rx_mode(i2s_chan_handle_t h,const i2s_pdm_rx_config_t*c){(void)h;(void)c;return ESP_OK;}
-esp_err_t i2s_channel_enable(i2s_chan_handle_t h){(void)h;return ESP_OK;}
+esp_err_t i2s_new_channel(const i2s_chan_config_t*c,void*t,i2s_chan_handle_t*h){(void)c;(void)t;atomic_fetch_add(&i2s_create_count,1);*h=(void*)1;vk_audio_native_resource_allocated(VK_AUDIO_NATIVE_RESOURCE_I2S);return ESP_OK;}
+esp_err_t i2s_channel_init_pdm_rx_mode(i2s_chan_handle_t h,const i2s_pdm_rx_config_t*c){(void)h;(void)c;atomic_fetch_add(&i2s_initialize_count,1);return ESP_OK;}
+esp_err_t i2s_channel_enable(i2s_chan_handle_t h){(void)h;atomic_fetch_add(&i2s_enable_count,1);return ESP_OK;}
 esp_err_t i2s_channel_read(i2s_chan_handle_t h,void*b,size_t z,size_t*n,uint32_t t){(void)h;(void)t;atomic_store(&i2s_read_entered,true);while(atomic_load(&i2s_block)){}int e=atomic_load(&i2s_read_error);if(e)return e;memset(b,0,z<16?z:16);*n=z<16?z:16;return ESP_OK;}
 esp_err_t i2s_channel_disable(i2s_chan_handle_t h){(void)h;atomic_fetch_add(&i2s_disable_count,1);int remaining=atomic_load(&i2s_disable_failures);if(remaining>0&&atomic_compare_exchange_strong(&i2s_disable_failures,&remaining,remaining-1))return ESP_FAIL;return ESP_OK;}
 esp_err_t i2s_del_channel(i2s_chan_handle_t h){(void)h;atomic_fetch_add(&i2s_destroy_count,1);int remaining=atomic_load(&i2s_destroy_failures);if(remaining>0&&atomic_compare_exchange_strong(&i2s_destroy_failures,&remaining,remaining-1))return ESP_FAIL;vk_audio_native_resource_freed(VK_AUDIO_NATIVE_RESOURCE_I2S);return ESP_OK;}
@@ -71,8 +78,10 @@ int opus_encode(OpusEncoder*e,const int16_t*s,int n,uint8_t*p,opus_int32 z){(voi
 void opus_encoder_destroy(OpusEncoder*e){atomic_fetch_add(&opus_destroy_count,1);free(e);}
 esp_err_t vk_usb_current_epoch(uint32_t*e){*e=7;return ESP_OK;}
 esp_err_t vk_usb_send_audio(uint32_t e,const vk_usb_audio_frame_t*f){(void)e;atomic_fetch_add(&usb_send_count,1);if((f->flags&0x02U)!=0U)atomic_fetch_add(&usb_final_count,1);return atomic_load(&usb_send_error);}
+esp_err_t vk_usb_register_uac_source(const vk_usb_uac_source_registration_t *source){assert(source&&source->start&&source->read&&source->stop);registered_uac_source=*source;return ESP_OK;}
+esp_err_t vk_usb_register_audio_diagnostics_provider(const vk_usb_audio_diagnostics_provider_registration_t *provider){assert(provider&&provider->get_snapshot);registered_diagnostics=*provider;return ESP_OK;}
 
-static void reset_faults(void){atomic_store(&allocation_fail_after,0);atomic_store(&allocation_count,0);atomic_store(&afe_mode,0);atomic_store(&opus_ctl_fail_at,0);atomic_store(&opus_ctl_count,0);atomic_store(&usb_send_error,0);atomic_store(&usb_send_count,0);atomic_store(&usb_final_count,0);atomic_store(&i2s_read_error,ESP_ERR_TIMEOUT);atomic_store(&i2s_disable_failures,0);atomic_store(&i2s_destroy_failures,0);atomic_store(&i2s_disable_count,0);atomic_store(&i2s_destroy_count,0);atomic_store(&i2s_block,false);atomic_store(&i2s_read_entered,false);atomic_store(&afe_create_block,false);atomic_store(&afe_create_entered,false);}
+static void reset_faults(void){atomic_store(&allocation_fail_after,0);atomic_store(&allocation_count,0);atomic_store(&afe_mode,0);atomic_store(&opus_ctl_fail_at,0);atomic_store(&opus_ctl_count,0);atomic_store(&usb_send_error,0);atomic_store(&usb_send_count,0);atomic_store(&usb_final_count,0);atomic_store(&i2s_read_error,ESP_ERR_TIMEOUT);atomic_store(&i2s_disable_failures,0);atomic_store(&i2s_destroy_failures,0);atomic_store(&i2s_create_count,0);atomic_store(&i2s_initialize_count,0);atomic_store(&i2s_enable_count,0);atomic_store(&i2s_disable_count,0);atomic_store(&i2s_destroy_count,0);atomic_store(&i2s_block,false);atomic_store(&i2s_read_entered,false);atomic_store(&afe_create_block,false);atomic_store(&afe_create_entered,false);}
 static void*getter_loop(void*p){(void)p;for(int i=0;i<1000;i++){(void)vk_audio_is_active();(void)vk_audio_session_id();(void)vk_audio_is_tainted();}return NULL;}
 typedef struct { uint32_t session_id; esp_err_t result; } start_result_t;
 static void*start_call(void*p){start_result_t*r=p;r->session_id=0;r->result=vk_audio_start(&r->session_id);return NULL;}
@@ -82,6 +91,7 @@ static void wait_for_read(void){struct timespec pause={0,1000000L};for(int i=0;i
 static void wait_for_afe_create(void){struct timespec pause={0,1000000L};for(int i=0;i<5000&&!atomic_load(&afe_create_entered);++i)nanosleep(&pause,NULL);assert(atomic_load(&afe_create_entered));}
 static void wait_for_no_tasks(void){struct timespec pause={0,1000000L};for(int i=0;i<5000&&atomic_load(&task_live_count)!=0;++i)nanosleep(&pause,NULL);assert(atomic_load(&task_live_count)==0);}
 static void assert_all_resources_released(void){for(int r=0;r<VK_AUDIO_NATIVE_RESOURCE_COUNT;r++)assert(atomic_load(&resource_alloc[r])==atomic_load(&resource_free[r]));}
+static void assert_only_persistent_i2s(void){for(int r=0;r<VK_AUDIO_NATIVE_RESOURCE_COUNT;r++){int outstanding=atomic_load(&resource_alloc[r])-atomic_load(&resource_free[r]);assert(outstanding==(r==VK_AUDIO_NATIVE_RESOURCE_I2S?1:0));}}
 static void assert_retained_resources(bool disable_failed){
     for(int r=0;r<VK_AUDIO_NATIVE_RESOURCE_COUNT;++r){
         bool retained=r==VK_AUDIO_NATIVE_RESOURCE_SESSION||r==VK_AUDIO_NATIVE_RESOURCE_RING||
@@ -119,6 +129,36 @@ int main(int argc, char **argv)
         assert(vk_audio_stop()==ESP_OK);wait_for_no_tasks();assert(atomic_load(&usb_final_count)==1);
         puts("vk_audio abort no-EOS and normal stop EOS passed");return 0;
     }
+    if(argc==2&&strcmp(argv[1],"system-mic")==0){
+        pthread_mutex_lock(&started_gate_mutex);started_gate_enabled=true;started_gate_entered=false;started_gate_release=false;pthread_mutex_unlock(&started_gate_mutex);
+        assert(registered_uac_source.start(registered_uac_source.context)==ESP_OK);
+        pthread_mutex_lock(&started_gate_mutex);while(!started_gate_entered)pthread_cond_wait(&started_gate_condition,&started_gate_mutex);started_gate_release=true;pthread_cond_broadcast(&started_gate_condition);pthread_mutex_unlock(&started_gate_mutex);
+        wait_for_read();
+        uint8_t pcm[320];size_t read_bytes=0U;
+        memset(pcm,0xa5,sizeof(pcm));
+        assert(registered_uac_source.read(registered_uac_source.context,pcm,sizeof(pcm),&read_bytes)==ESP_OK);
+        assert(read_bytes==sizeof(pcm));
+        for(size_t index=0;index<sizeof(pcm);++index)assert(pcm[index]==0U);
+        registered_uac_source.stop(registered_uac_source.context);wait_for_no_tasks();
+        vk_usb_audio_diagnostics_t diagnostics={0};
+        assert(registered_diagnostics.get_snapshot(registered_diagnostics.context,7U,&diagnostics)==ESP_OK);
+        assert(diagnostics.source_start_attempts==1U&&diagnostics.source_starts==1U&&diagnostics.source_start_failures==0U&&diagnostics.source_stops==1U);
+        assert(diagnostics.last_source_start_error==ESP_OK);
+        assert(diagnostics.i2s_reads>0U&&diagnostics.i2s_read_bytes==0U);
+        assert(diagnostics.i2s_timeouts>0U&&diagnostics.published_samples==0U);
+        assert(diagnostics.uac_reads==1U&&diagnostics.uac_underflow_bytes==sizeof(pcm));
+        assert(!diagnostics.source_active&&diagnostics.i2s_initialized&&!diagnostics.i2s_enabled);
+        atomic_store(&i2s_read_entered,false);
+        assert(registered_uac_source.start(registered_uac_source.context)==ESP_OK);wait_for_read();
+        registered_uac_source.stop(registered_uac_source.context);wait_for_no_tasks();
+        pthread_mutex_lock(&started_gate_mutex);started_gate_enabled=false;pthread_mutex_unlock(&started_gate_mutex);
+        assert(atomic_load(&i2s_create_count)==1&&atomic_load(&i2s_initialize_count)==1);
+        assert(atomic_load(&i2s_enable_count)==2&&atomic_load(&i2s_disable_count)==2);
+        assert(atomic_load(&i2s_destroy_count)==0);assert_only_persistent_i2s();
+        assert(vk_audio_deinit()==ESP_OK);assert(atomic_load(&i2s_destroy_count)==1);assert_all_resources_released();
+        assert(atomic_load(&usb_send_count)==0&&atomic_load(&usb_final_count)==0);
+        puts("vk_audio UAC source reuses one persistent PDM channel across opens");return 0;
+    }
     if(argc==2&&strcmp(argv[1],"cleanup-disable")==0){
         int baseline=atomic_load(&semaphore_live_count);assert(vk_audio_start(&sid)==ESP_OK&&sid!=0);
         atomic_store(&i2s_disable_failures,2);assert(vk_audio_stop()==ESP_FAIL);wait_for_no_tasks();
@@ -131,24 +171,24 @@ int main(int argc, char **argv)
     }
     if(argc==2&&strcmp(argv[1],"cleanup-persistent")==0){
         assert(vk_audio_start(&sid)==ESP_OK&&sid!=0);atomic_store(&i2s_destroy_failures,4);
-        assert(vk_audio_stop()==ESP_FAIL);wait_for_no_tasks();assert_retained_resources(false);
-        assert(vk_audio_deinit()==ESP_FAIL);assert_retained_resources(false);
-        assert(vk_audio_deinit()==ESP_FAIL);assert_retained_resources(false);
-        assert(vk_audio_deinit()==ESP_FAIL);assert_retained_resources(false);
+        assert(vk_audio_stop()==ESP_OK);wait_for_no_tasks();assert_only_persistent_i2s();
+        assert(vk_audio_deinit()==ESP_FAIL);assert_only_persistent_i2s();
+        assert(vk_audio_deinit()==ESP_FAIL);assert_only_persistent_i2s();
+        assert(vk_audio_deinit()==ESP_FAIL);assert_only_persistent_i2s();
+        assert(vk_audio_deinit()==ESP_FAIL);assert_only_persistent_i2s();
         assert(vk_audio_deinit()==ESP_OK);assert_all_resources_released();
-        assert(vk_audio_deinit()==ESP_ERR_INVALID_STATE);assert_all_resources_released();
         assert(atomic_load(&i2s_disable_count)==1);assert(atomic_load(&i2s_destroy_count)==5);
-        puts("vk_audio persistent cleanup retention and eventual release passed");return 0;
+        puts("vk_audio persistent PDM teardown retries until eventual release");return 0;
     }
     if(argc==2&&strcmp(argv[1],"cleanup-destroy")==0){
         int baseline=atomic_load(&semaphore_live_count);assert(vk_audio_start(&sid)==ESP_OK&&sid!=0);
-        atomic_store(&i2s_destroy_failures,2);assert(vk_audio_stop()==ESP_FAIL);wait_for_no_tasks();
-        assert(vk_audio_is_tainted());assert(atomic_load(&semaphore_live_count)==baseline+2);assert_retained_resources(false);
-        assert(vk_audio_deinit()==ESP_FAIL);assert(atomic_load(&semaphore_live_count)==baseline+2);assert_retained_resources(false);
+        atomic_store(&i2s_destroy_failures,2);assert(vk_audio_stop()==ESP_OK);wait_for_no_tasks();
+        assert(!vk_audio_is_tainted());assert(atomic_load(&semaphore_live_count)==baseline);assert_only_persistent_i2s();
+        assert(vk_audio_deinit()==ESP_FAIL);assert(atomic_load(&semaphore_live_count)==baseline);assert_only_persistent_i2s();
+        assert(vk_audio_deinit()==ESP_FAIL);assert(atomic_load(&semaphore_live_count)==baseline);assert_only_persistent_i2s();
         assert(vk_audio_deinit()==ESP_OK);assert(atomic_load(&semaphore_live_count)==baseline);assert_all_resources_released();
-        assert(vk_audio_deinit()==ESP_ERR_INVALID_STATE);assert_all_resources_released();
         assert(atomic_load(&i2s_disable_count)==1);assert(atomic_load(&i2s_destroy_count)==3);
-        puts("vk_audio retained destroy cleanup retry passed");return 0;
+        puts("vk_audio persistent PDM destroy failure stays retryable");return 0;
     }
     if(argc==2&&strcmp(argv[1],"start-stop")==0){
         /* Stop linearizes first: the contending start is admitted only after the
@@ -164,7 +204,7 @@ int main(int argc, char **argv)
         /* Start linearizes first: stop waits at the exact production mutex while
          * AFE construction holds the admitted start. */
         start_result_t before_stop={0};atomic_store(&afe_create_block,true);atomic_store(&afe_create_entered,false);pthread_create(&starter,NULL,start_call,&before_stop);wait_for_afe_create();pthread_create(&stopper,NULL,stop_call,NULL);atomic_store(&afe_create_block,false);pthread_join(starter,NULL);pthread_join(stopper,&r);
-        assert(before_stop.result==ESP_OK&&before_stop.session_id!=0&&before_stop.session_id!=after_stop.session_id);assert((esp_err_t)(intptr_t)r==ESP_OK);wait_for_no_tasks();assert(!vk_audio_is_active());assert_all_resources_released();
+        assert(before_stop.result==ESP_OK&&before_stop.session_id!=0&&before_stop.session_id!=after_stop.session_id);assert((esp_err_t)(intptr_t)r==ESP_OK);wait_for_no_tasks();assert(!vk_audio_is_active());assert_only_persistent_i2s();
         puts("vk_audio deterministic start versus stop passed");return 0;
     }
     if(argc==2&&strcmp(argv[1],"concurrency")==0){

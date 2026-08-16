@@ -207,6 +207,33 @@ struct AppModelTests {
         #expect(await session.widgetCount() == 1)
     }
 
+    @Test func k4HoldModifierUsesPhysicalDownAndUpWithoutGestureRouting() async throws {
+        let descriptor = testDescriptor()
+        let monitor = TestMonitor()
+        let session = TestSession(descriptor: descriptor)
+        let pipeline = ActionPipelineSpy()
+        var profile = KeyMappingProfile.vendorDefault()
+        profile.mappings[.k4]?.single = .holdKey("f2")
+        let store = MemoryConfigurationStore(data: try JSONEncoder().encode(profile))
+        let model = AppModel(
+            monitor: monitor,
+            sessionFactory: TestSessionFactory(session: session),
+            mappingRepository: KeyMappingRepository(store: store),
+            actionPipeline: pipeline
+        )
+        model.start()
+        monitor.send(.attached(descriptor))
+        await eventually { model.isConnected }
+        await eventually { model.keyProfile.mappings[.k4]?.single == .holdKey("f2") }
+
+        session.send(.stateEvent(try state(#"{"event":"button_down","button":"k4","duration_ms":0}"#)))
+        session.send(.stateEvent(try state(#"{"event":"button_up","button":"k4","duration_ms":1600}"#)))
+        session.send(.stateEvent(try state(#"{"event":"button_click","button":"k4","duration_ms":1600}"#)))
+
+        await eventually { await pipeline.heldKeyEvents() == ["f2:down", "f2:up"] }
+        #expect(await pipeline.eventCount() == 0)
+    }
+
     @Test func mappingsPersistOnlyThroughRepository() async throws {
         let descriptor = testDescriptor()
         let monitor = TestMonitor()
@@ -283,6 +310,9 @@ struct AppModelTests {
         #expect(ProductionHostActionAdapter.keyCode(forShortcutKey: "F20") == 90)
         #expect(ProductionHostActionAdapter.keyCode(forShortcutKey: "pageup") == 116)
         #expect(ProductionHostActionAdapter.keyCode(forShortcutKey: "unknown") == nil)
+        #expect(ProductionHostActionAdapter.supportsHeldKey("f2"))
+        #expect(ProductionHostActionAdapter.supportsHeldKey("right_command"))
+        #expect(!ProductionHostActionAdapter.supportsHeldKey("not a key"))
 
         let flags = ProductionHostActionAdapter.flags(for: [.control, .function])
         #expect(flags.contains(.maskControl))
@@ -543,6 +573,7 @@ private actor ActionPipelineSpy: AppActionRouting {
     private var eventTimestamps: [UInt64] = []
     private var executedActions: [HostAction] = []
     private var resets = 0
+    private var heldKeys: [String] = []
     func updateProfile(_ profile: KeyMappingProfile) async throws {}
     func consume(_ event: DeviceKeyEvent, at timestampMilliseconds: UInt64) async throws -> [ActionExecutionResult] {
         events.append(event)
@@ -553,11 +584,15 @@ private actor ActionPipelineSpy: AppActionRouting {
         executedActions.append(action)
         return .completed
     }
+    func setHeldKey(_ key: String, pressed: Bool) async throws {
+        heldKeys.append("\(key):\(pressed ? "down" : "up")")
+    }
     func disconnect(at timestampMilliseconds: UInt64) async throws { resets += 1 }
     func eventCount() -> Int { events.count }
     func timestamps() -> [UInt64] { eventTimestamps }
     func resetCount() -> Int { resets }
     func executedCount() -> Int { executedActions.count }
+    func heldKeyEvents() -> [String] { heldKeys }
 }
 
 private actor DashboardProviderStub: LiveDashboardProviding {
@@ -598,6 +633,11 @@ private func state(_ json: String) throws -> StateEvent {
 
 private actor MemoryConfigurationStore: ConfigurationDataStore {
     private var data: Data?
+
+    init(data: Data? = nil) {
+        self.data = data
+    }
+
     func read() -> Data? { data }
     func replaceAtomically(with data: Data) { self.data = data }
     func hasData() -> Bool { data != nil }

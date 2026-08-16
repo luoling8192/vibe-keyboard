@@ -6,7 +6,10 @@ Status: Vendor core framing and USB handshake verified; replacement USB epoch, c
 
 This product uses USB only. Bluetooth and network transports are not fallback paths and are not represented in the client transport API.
 
-The current device is an ESP32-S3 USB serial/JTAG device. macOS exposes its callout path as `/dev/cu.usbmodem*`; the path is assigned dynamically and must never be hard-coded.
+The replacement application is an ESP32-S3 USB OTG composite device. Its CDC
+interface is exposed by macOS as `/dev/cu.usbmodem*`; the path is assigned
+dynamically and must never be hard-coded. The same USB device also exposes one
+UAC2 microphone interface. ROM download mode remains USB Serial/JTAG.
 
 ## Device Discovery
 
@@ -24,7 +27,7 @@ For the observed serial `02:00:00:00:00:01`, the device ID is `020000000001`.
 
 VibeBoard.app 0.5.4 filters by vendor ID and does not contain a proven product-ID filter. This project is intentionally narrower and must require both the target VID and PID so another Espressif serial device is not selected.
 
-## Serial Session
+## CDC Session
 
 VibeBoard.app opens the callout path with:
 
@@ -43,7 +46,10 @@ tcsetattr(TCSANOW)
 
 No call to `cfsetispeed` or `cfsetospeed` and no fixed baud-rate constant has been found. The client must not claim or require a specific baud rate. A diagnostic override may be introduced only if live evidence proves it necessary.
 
-The session owns one file descriptor, one read source, one incremental receive buffer, and serialized writes. Detach, EOF, unrecoverable read/write error, or explicit disconnect must cancel the source and close the descriptor exactly once.
+The CDC session owns one file descriptor, one read source, one incremental
+receive buffer, and serialized writes. Detach, EOF, unrecoverable read/write
+error, or explicit disconnect must cancel the source and close the descriptor
+exactly once. UAC streaming is independent of the CDC epoch and ping lease.
 
 ## Frame Envelope
 
@@ -267,7 +273,10 @@ A clean-boot live test completed this sequence using body-length frames. The cur
 
 ## Replacement USB Epoch and Capabilities
 
-Replacement firmware uses the ESP32-S3 built-in USB Serial/JTAG driver only. It does not initialize TinyUSB, USB OTG CDC, USB Audio Class, Bluetooth, Wi-Fi, or a network fallback.
+Replacement firmware uses the ESP32-S3 internal USB PHY in USB OTG device mode
+and initializes one TinyUSB composite device: CDC carries this protocol and
+UAC2 carries microphone PCM. It does not initialize USB host mode, Bluetooth,
+Wi-Fi, or a network fallback.
 
 A valid `{"event":"transport","kind":"usb"}` command proposes a new protocol epoch. Before publishing it, the USB owner closes old-epoch producer admission in its synchronization domain and begins every registered asynchronous typed lifecycle participant without holding the USB state lock. The first request uses old-epoch sentinel zero. One exact USB-owned 3,250 ms absolute acknowledgement deadline covers the complete participant set: input/audio may consume at most 1,500 ms for the remainder of an executing ordinary audio call, 1,500 ms for audio abort/join, and 250 ms for callback handoff and cleanup; LED runs concurrently within the same remaining deadline and may not extend it. The owner tracks one matching acknowledgement cell per registered participant. Only matching in-deadline `QUIESCENT` acknowledgements from every participant permit the new epoch to become visible. Any begin failure, timeout, or `TAINTED` result permanently taints/closes that USB composition; a late acknowledgement cannot publish the proposed epoch. A successful transition then clears the incremental parser, heartbeat lease, temporary asset/update state, pending input gestures, active audio session association, and epoch-local LED override. It does not change committed configuration, assets, manifests, NVS, or OTA selection. Duplicate transport commands are idempotent requests but create a fresh epoch only after this exact prior-state quiescence gate.
 
@@ -303,7 +312,13 @@ Replacement `device_info.replacement_protocol` is exactly `1`; it is only a hand
 
 ### Production Byte-Stream Isolation
 
-The application protocol is the only producer on USB Serial/JTAG CDC after startup. Production configuration must disable primary and secondary consoles, application and bootloader log output, VFS console output, and panic text on this CDC stream. Project source must not route `printf`, ROM prints, `ESP_LOG*`, or panic output into protocol bytes. Development diagnostics use JTAG or a separately reviewed build mode. Parser resynchronization tolerates pre-application noise but does not authorize application log interleaving.
+The application protocol is the only producer on the composite device's CDC
+interface after startup. Production configuration must disable primary and
+secondary consoles, application and bootloader log output, VFS console output,
+and panic text on this CDC stream. Project source must not route `printf`, ROM
+prints, `ESP_LOG*`, or panic output into protocol bytes. Development diagnostics
+use JTAG or a separately reviewed build mode. Parser resynchronization tolerates
+pre-application noise but does not authorize application log interleaving.
 
 One service task owns driver install/uninstall on one core and one serialized TX boundary writes complete typed frames. Control and audio queues are bounded, and producer admission plus installed/epoch/expiry/stop/overflow state use one synchronization domain. Control overflow schedules the reserved terminal event `{"event":"vk_error","operation":"session","code":"control_queue_overflow"}`, clears queued control/audio values, and invalidates the epoch; only the USB owner encodes/writes that terminal. Audio overflow schedules the reserved terminal event `{"event":"vk_error","operation":"audio","code":"audio_queue_overflow","session_id":N}`, clears every queued AudioFrame for that session, marks that recording truncated, and rejects further frames for it; it never fabricates EOS or lets a queued prefix continue draining as a complete recording. Input FIFO or ordinary audio-control mailbox overflow invokes the typed `vk_usb_fail_epoch(expected_epoch, VK_USB_SESSION_ERROR_INPUT_QUEUE_OVERFLOW)`, which schedules `{"event":"vk_error","operation":"input","code":"input_queue_overflow"}`. Unproved audio ownership after prepare/release/cancel/stop invokes `vk_usb_fail_epoch(expected_epoch, VK_USB_SESSION_ERROR_INPUT_TAINTED)`, which schedules `{"event":"vk_error","operation":"input","code":"tainted"}`. These are the only input terminal reasons. Both close that exact epoch; lifecycle callback code never calls either operation.
 
@@ -319,7 +334,14 @@ Exactly one lifecycle request may be outstanding. Admission and precedence are l
 
 Input/audio owns a separate single reserved lifecycle-abort slot, unavailable to its four ordinary commands. After ordinary admission closes, callback begin clears queued ordinary work and admits `abort(old_epoch,lifecycle_generation,0)` through that slot even when ordinary command/result mailboxes are full. An already executing ordinary call may consume at most its existing 1,500 ms remainder; audio control then starts no further ordinary work, gives abort/join at most 1,500 ms, and reserves 250 ms for cleanup and acknowledgement. Every step is capped by the remaining time to the one USB-owned 3,250 ms absolute deadline; no retry extends it. Completion reports directly to the acknowledgement sink, not through the result mailbox. Slot conflict or immediate admission failure makes `begin` return tainted without waiting or USB re-entry. For first new-epoch and pre-epoch stopping, old epoch zero requires no audio command but still closes local admission, clears unpublished scanner/FIFO/mailbox/association state, and publishes through the matching bounded acknowledgement cell. Pre-epoch stopping then completes teardown and never exposes an epoch. A nonzero old epoch acknowledges quiescent only after bounded abort/join proves no old AudioFrame/result producer remains. Current-call overrun, abort failure, exhausted remaining time, or timeout acknowledges tainted when possible and otherwise reaches the same fail-closed USB deadline result.
 
-The public integration boundary exposes only typed lifecycle registration and typed sends: canonical button event values, bounded AudioFrame values, exact asset command values, and exact update command values. Downstream handlers never receive raw JSON, arbitrary event names, frame types, byte bodies, a service pointer, or a raw send callback. Unregistered handlers are absent from capabilities and their commands return typed `unsupported`. The replacement transport remains ESP32-S3 built-in USB Serial/JTAG only; BLE, Wi-Fi, network, TinyUSB, USB OTG CDC, and USB Audio Class are prohibited fallbacks.
+The public integration boundary exposes only typed lifecycle registration and
+typed sends: canonical button event values, bounded AudioFrame values, exact
+asset command values, and exact update command values. Downstream handlers
+never receive raw JSON, arbitrary event names, frame types, byte bodies, a
+service pointer, or a raw send callback. Unregistered handlers are absent from
+capabilities and their commands return typed `unsupported`. The replacement
+transport remains the single TinyUSB composite device; BLE, Wi-Fi, network,
+USB host mode, and any second fallback transport are prohibited.
 
 Verified ordinary commands:
 
