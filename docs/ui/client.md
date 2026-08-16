@@ -136,7 +136,8 @@ Status: Draft
 VibeKeyboardApplication (@main)
   └─ @MainActor AppModel
        ├─ USBDeviceMonitor (VID 303a / PID 1001)
-       ├─ USBSession (USB Serial/JTAG only)
+       ├─ USBSession (composite-device CDC interface)
+       ├─ macOS CoreAudio (independent UAC2 microphone consumer)
        ├─ AssetTransferService / ScreenConfigurationService
        ├─ KeyMappingRepository
        └─ AudioRecordingSession → Ogg Opus

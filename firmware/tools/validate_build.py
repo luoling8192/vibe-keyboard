@@ -42,6 +42,10 @@ required_definitions = [
     "#define CONFIG_FREERTOS_HZ 1000",
     "#define CONFIG_ESP_MAIN_TASK_STACK_SIZE 8192",
     "#define CONFIG_SPIFFS_OBJ_NAME_LEN 96",
+    "#define CONFIG_USB_DEVICE_UAC_AS_PART 1",
+    "#define CONFIG_UAC_MIC_CHANNEL_NUM 1",
+    "#define CONFIG_UAC_SAMPLE_RATE 16000",
+    "#define CONFIG_UAC_SUPPORT_MACOS 1",
 ]
 missing = [item for item in required_definitions if item not in compiled_sdkconfig]
 if missing:
@@ -63,7 +67,7 @@ symbols = subprocess.run([nm, "-g", str(BUILD / "vibe_keyboard.elf")], check=Tru
 forbidden_symbol_prefixes = (
     "esp_wifi_", "esp_bt_", "esp_ble_", "nimble_", "ble_",
     "esp_http_", "httpd_", "mqtt_", "esp_mqtt_",
-    "tinyusb_", "tusb_", "tud_", "tuh_", "usb_host_", "uac_",
+    "tuh_", "usb_host_",
 )
 forbidden_symbols = {
     "socket", "socketpair", "bind", "listen", "accept", "connect",
@@ -76,6 +80,20 @@ linked_forbidden = sorted(name for name in linked_names
                           name.startswith(forbidden_symbol_prefixes))
 if linked_forbidden:
     raise SystemExit(f"forbidden network/Bluetooth entry points linked: {linked_forbidden}")
+required_usb_symbols = {
+    "tusb_rhport_init", "uac_device_init", "tud_audio_n_write",
+    "tud_cdc_n_read", "tud_cdc_n_write",
+}
+missing_usb_symbols = sorted(required_usb_symbols - linked_names)
+if missing_usb_symbols:
+    raise SystemExit(f"composite CDC/UAC symbols missing: {missing_usb_symbols}")
+legacy_usb_symbols = {
+    "usb_serial_jtag_driver_install", "usb_serial_jtag_read_bytes",
+    "usb_serial_jtag_write_bytes",
+}
+linked_legacy_usb = sorted(legacy_usb_symbols & linked_names)
+if linked_legacy_usb:
+    raise SystemExit(f"legacy USB Serial/JTAG transport still linked: {linked_legacy_usb}")
 
 objdump = os.environ.get(
     "OBJDUMP",
@@ -149,6 +167,25 @@ if usb_task_stack_bytes < usb_screen_stack_estimate + 4096:
         f"{usb_task_stack_bytes} < {usb_screen_stack_estimate + 4096}"
     )
 
+audio_source = (ROOT / "components/vk_audio/vk_audio.c").read_text()
+audio_stack_match = re.search(
+    r"#define\s+VK_AUDIO_WORKER_STACK_BYTES\s+(\d+)U", audio_source
+)
+if audio_stack_match is None:
+    raise SystemExit("missing audio worker stack contract")
+audio_task_stack_bytes = int(audio_stack_match.group(1))
+audio_stack_minimum = stack_frames["vk_audio_backend_capture"] + 8192
+if audio_task_stack_bytes < audio_stack_minimum:
+    raise SystemExit(
+        f"audio task stack lacks capture/library margin: "
+        f"{audio_task_stack_bytes} < {audio_stack_minimum}"
+    )
+if audio_task_stack_bytes > 16384:
+    raise SystemExit(
+        f"audio task stack exceeds production internal-RAM admission: "
+        f"{audio_task_stack_bytes} > 16384"
+    )
+
 app_bytes = artifacts[-1].read_bytes()
 forbidden_patterns = {
     "colon MAC literal": re.compile(
@@ -175,6 +212,8 @@ result = {
     "stack_frames_bytes": stack_frames,
     "usb_screen_stack_estimate_bytes": usb_screen_stack_estimate,
     "usb_task_stack_bytes": usb_task_stack_bytes,
+    "audio_task_stack_bytes": audio_task_stack_bytes,
+    "audio_stack_minimum_bytes": audio_stack_minimum,
     "sensitive_markers_found": found_markers,
     "artifacts": {
         str(path.relative_to(BUILD)): {

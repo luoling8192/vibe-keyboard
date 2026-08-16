@@ -207,6 +207,33 @@ struct AppModelTests {
         #expect(await session.widgetCount() == 1)
     }
 
+    @Test func k4HoldModifierUsesPhysicalDownAndUpWithoutGestureRouting() async throws {
+        let descriptor = testDescriptor()
+        let monitor = TestMonitor()
+        let session = TestSession(descriptor: descriptor)
+        let pipeline = ActionPipelineSpy()
+        var profile = KeyMappingProfile.vendorDefault()
+        profile.mappings[.k4]?.single = .holdKey("f2")
+        let store = MemoryConfigurationStore(data: try JSONEncoder().encode(profile))
+        let model = AppModel(
+            monitor: monitor,
+            sessionFactory: TestSessionFactory(session: session),
+            mappingRepository: KeyMappingRepository(store: store),
+            actionPipeline: pipeline
+        )
+        model.start()
+        monitor.send(.attached(descriptor))
+        await eventually { model.isConnected }
+        await eventually { model.keyProfile.mappings[.k4]?.single == .holdKey("f2") }
+
+        session.send(.stateEvent(try state(#"{"event":"button_down","button":"k4","duration_ms":0}"#)))
+        session.send(.stateEvent(try state(#"{"event":"button_up","button":"k4","duration_ms":1600}"#)))
+        session.send(.stateEvent(try state(#"{"event":"button_click","button":"k4","duration_ms":1600}"#)))
+
+        await eventually { await pipeline.heldKeyEvents() == ["f2:down", "f2:up"] }
+        #expect(await pipeline.eventCount() == 0)
+    }
+
     @Test func mappingsPersistOnlyThroughRepository() async throws {
         let descriptor = testDescriptor()
         let monitor = TestMonitor()
@@ -283,6 +310,9 @@ struct AppModelTests {
         #expect(ProductionHostActionAdapter.keyCode(forShortcutKey: "F20") == 90)
         #expect(ProductionHostActionAdapter.keyCode(forShortcutKey: "pageup") == 116)
         #expect(ProductionHostActionAdapter.keyCode(forShortcutKey: "unknown") == nil)
+        #expect(ProductionHostActionAdapter.supportsHeldKey("f2"))
+        #expect(ProductionHostActionAdapter.supportsHeldKey("right_command"))
+        #expect(!ProductionHostActionAdapter.supportsHeldKey("not a key"))
 
         let flags = ProductionHostActionAdapter.flags(for: [.control, .function])
         #expect(flags.contains(.maskControl))
@@ -333,9 +363,9 @@ struct AppModelTests {
         #expect(layout.widgets.count == 6)
         #expect(layout.objects.count == 6)
         #expect(layout.widgets.first == .text(
-            id: "left-title",
-            target: "left-title-value",
-            fallback: "A1 CODEX"
+            id: "left-content",
+            target: "left-content-value",
+            fallback: "CODEX\nLIMIT 45%\nSTATE READY"
         ))
         #expect(try ReplacementCommandEncoder.encode(.commit(commit)).count <= 4096)
 
@@ -349,8 +379,8 @@ struct AppModelTests {
         await eventually { await session.widgetCount() >= 6 }
         let widgets = await session.allWidgets()
         #expect(Array(widgets.prefix(6).map(\.widgetID)) == [
-            "left-title", "left-line1", "left-line2",
-            "right-title", "right-line1", "right-line2",
+            "left-content", "left-cpu", "left-memory",
+            "right-content", "right-cpu", "right-memory",
         ])
         #expect(widgets.prefix(6).allSatisfy { $0.revision == 1 })
     }
@@ -374,27 +404,55 @@ struct AppModelTests {
 
         let first = snapshot.page(modules: modules, pageIndex: 0, stockOffset: 0)
         #expect(first.left == .init(
-            title: "A1 CODEX",
-            line1: "LIMIT 45%",
-            line2: "TODAY 1.2M"
+            module: .codex,
+            title: "CODEX",
+            lines: ["LIMIT 45%", "STATE READY"]
         ))
         #expect(first.right == .init(
-            title: "A2 SYSTEM",
-            line1: "CPU 23%",
-            line2: "MEM 67%"
+            module: .system,
+            title: "SYSTEM",
+            lines: ["CPU 23%", "MEMORY 67%"]
         ))
 
         let second = snapshot.page(modules: modules, pageIndex: 1, stockOffset: 2)
         #expect(second.left == .init(
-            title: "B1 STOCKS 3-1/3",
-            line1: "00700 601.50 -0.18%",
-            line2: "000001 3876.8 +0.25%"
+            module: .stocks,
+            title: "STOCKS",
+            lines: [
+                "00700 601.50 -0.18%",
+                "000001 3876.8 +0.25%",
+                "AAPL 220.12 +0.57%",
+            ]
         ))
         #expect(second.right == .init(
-            title: "B2 NETWORK",
-            line1: "DOWN 1.5M/s",
-            line2: "UP 42K/s"
+            module: .network,
+            title: "NETWORK",
+            lines: ["DOWN 1.5M/s", "UP 42K/s", "LINK ACTIVE"]
         ))
+    }
+
+    @Test func dashboardPagesAreDynamicAndSelectorsStayIndependent() {
+        let model = AppModel(
+            monitor: TestMonitor(),
+            sessionFactory: TestSessionFactory(
+                session: TestSession(descriptor: testDescriptor())
+            ),
+            mappingRepository: KeyMappingRepository(
+                store: MemoryConfigurationStore()
+            )
+        )
+
+        model.setDashboardModule(.network, at: 0)
+        #expect(model.dashboardModules == [.network, .claude, .system, .stocks])
+
+        model.addDashboardPage()
+        #expect(model.dashboardModules.count == 6)
+        model.setDashboardModule(.codex, at: 4)
+        #expect(model.dashboardModules[0] == .network)
+        #expect(model.dashboardModules[4] == .codex)
+
+        model.removeDashboardPage(at: 1)
+        #expect(model.dashboardModules == [.network, .claude, .codex, .stocks])
     }
 
     @Test func stockInputIsBoundedAndASCIIQuoteParsingPreservesOrder() {
@@ -515,6 +573,7 @@ private actor ActionPipelineSpy: AppActionRouting {
     private var eventTimestamps: [UInt64] = []
     private var executedActions: [HostAction] = []
     private var resets = 0
+    private var heldKeys: [String] = []
     func updateProfile(_ profile: KeyMappingProfile) async throws {}
     func consume(_ event: DeviceKeyEvent, at timestampMilliseconds: UInt64) async throws -> [ActionExecutionResult] {
         events.append(event)
@@ -525,11 +584,15 @@ private actor ActionPipelineSpy: AppActionRouting {
         executedActions.append(action)
         return .completed
     }
+    func setHeldKey(_ key: String, pressed: Bool) async throws {
+        heldKeys.append("\(key):\(pressed ? "down" : "up")")
+    }
     func disconnect(at timestampMilliseconds: UInt64) async throws { resets += 1 }
     func eventCount() -> Int { events.count }
     func timestamps() -> [UInt64] { eventTimestamps }
     func resetCount() -> Int { resets }
     func executedCount() -> Int { executedActions.count }
+    func heldKeyEvents() -> [String] { heldKeys }
 }
 
 private actor DashboardProviderStub: LiveDashboardProviding {
@@ -570,6 +633,11 @@ private func state(_ json: String) throws -> StateEvent {
 
 private actor MemoryConfigurationStore: ConfigurationDataStore {
     private var data: Data?
+
+    init(data: Data? = nil) {
+        self.data = data
+    }
+
     func read() -> Data? { data }
     func replaceAtomically(with data: Data) { self.data = data }
     func hasData() -> Bool { data != nil }

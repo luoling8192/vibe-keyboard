@@ -46,6 +46,7 @@ struct vk_usb_service {
     bool stop_requested;
     bool epoch_active;
     vk_usb_capability_provider_registration_t capability_provider;
+    vk_usb_audio_diagnostics_provider_registration_t audio_diagnostics_provider;
     vk_usb_capability_snapshot_t capability_snapshot;
     uint32_t capability_epoch;
     uint32_t capability_generation;
@@ -648,6 +649,74 @@ static esp_err_t dispatch_update(vk_usb_service_t*s,const json_object_t*o,const 
     return send_error(s,"update","unsupported");
 }
 
+static esp_err_t dispatch_audio_diagnostics(vk_usb_service_t *s,
+                                            const json_object_t *object)
+{
+    const char *const keys[] = {"event"};
+    if (!exact_keys(object, keys, 1U)) {
+        return send_error(s, "audio_diagnostics", "invalid_request");
+    }
+
+    vk_usb_audio_diagnostics_provider_registration_t provider;
+    uint32_t epoch;
+    state_lock(s);
+    bool admitted = s->installed && !s->stop_requested && s->epoch_active &&
+        s->protocol_callback_admission_open &&
+        s->audio_diagnostics_provider.get_snapshot != NULL;
+    provider = s->audio_diagnostics_provider;
+    epoch = s->epoch;
+    if (admitted) ++s->protocol_callbacks_in_flight;
+    state_unlock(s);
+    if (!admitted) {
+        return send_error(s, "audio_diagnostics",
+                          provider.get_snapshot == NULL ? "unsupported" : "busy");
+    }
+
+    vk_usb_audio_diagnostics_t diagnostics = {0};
+    esp_err_t result = provider.get_snapshot(provider.context, epoch,
+                                              &diagnostics);
+    state_lock(s);
+    if (s->protocol_callbacks_in_flight != 0U) {
+        --s->protocol_callbacks_in_flight;
+    }
+    bool current = s->installed && !s->stop_requested && s->epoch_active &&
+        s->epoch == epoch && s->protocol_callback_admission_open;
+    state_unlock(s);
+    if (!current) return ESP_ERR_INVALID_STATE;
+    if (result != ESP_OK) {
+        return send_error(s, "audio_diagnostics", "unavailable");
+    }
+
+    int length = snprintf(
+        s->protocol_json, sizeof(s->protocol_json),
+        "{\"event\":\"vk_audio_diagnostics\",\"source_start_attempts\":%" PRIu32
+        ",\"source_starts\":%" PRIu32 ",\"source_start_failures\":%" PRIu32
+        ",\"source_stops\":%" PRIu32 ",\"i2s_reads\":%" PRIu32
+        ",\"i2s_read_bytes\":%" PRIu32 ",\"i2s_timeouts\":%" PRIu32
+        ",\"i2s_errors\":%" PRIu32 ",\"published_samples\":%" PRIu32
+        ",\"latest_peak\":%" PRIu32 ",\"uac_reads\":%" PRIu32
+        ",\"uac_consumed_bytes\":%" PRIu32
+        ",\"uac_underflow_bytes\":%" PRIu32 ",\"ring_bytes\":%" PRIu32
+        ",\"source_active\":%s,\"i2s_initialized\":%s,\"i2s_enabled\":%s"
+        ",\"last_source_start_error\":%" PRId32
+        ",\"last_i2s_error\":%" PRId32 "}",
+        diagnostics.source_start_attempts, diagnostics.source_starts,
+        diagnostics.source_start_failures, diagnostics.source_stops,
+        diagnostics.i2s_reads, diagnostics.i2s_read_bytes,
+        diagnostics.i2s_timeouts, diagnostics.i2s_errors,
+        diagnostics.published_samples, diagnostics.latest_peak,
+        diagnostics.uac_reads, diagnostics.uac_consumed_bytes,
+        diagnostics.uac_underflow_bytes, diagnostics.ring_bytes,
+        diagnostics.source_active ? "true" : "false",
+        diagnostics.i2s_initialized ? "true" : "false",
+        diagnostics.i2s_enabled ? "true" : "false",
+        diagnostics.last_source_start_error,
+        diagnostics.last_i2s_error);
+    return length < 0 || (size_t)length >= sizeof(s->protocol_json)
+        ? ESP_ERR_INVALID_SIZE
+        : send_json_bytes(s, s->protocol_json, (size_t)length);
+}
+
 static esp_err_t dispatch_json(vk_usb_service_t*s,const uint8_t*b,size_t n,dispatch_action_t*a)
 {
     *a=DISPATCH_CONTINUE;vk_usb_json_status_t json_status=vk_usb_json_parse(&s->json_document,b,n);uint16_t root=vk_usb_json_root(&s->json_document);if(json_status!=VK_USB_JSON_OK||root==VK_USB_JSON_NO_NODE||vk_usb_json_kind(&s->json_document,root)!=VK_USB_JSON_OBJECT)return send_error(s,"json","invalid_request");json_object_t o={.document=&s->json_document,.node=root};char event_storage[VK_USB_JSON_MAX_STRING_BYTES+1U];if(!string_copy_value(&o,"event",event_storage,sizeof(event_storage)))return send_error(s,"json","invalid_request");const char*event=event_storage;
@@ -667,6 +736,7 @@ static esp_err_t dispatch_json(vk_usb_service_t*s,const uint8_t*b,size_t n,dispa
     state_lock(s);bool active=s->installed&&!s->stop_requested&&s->epoch_active;state_unlock(s);if(!active)return send_error(s,event,"wrong_epoch");
     if(strcmp(event,"ping")==0){const char*const k[]={"event"};if(!exact_keys(&o,k,1))return send_error(s,"ping","invalid_request");uint64_t now=s->transport.now_ms(s->transport.context);state_lock(s);if(s->epoch_active)s->lease_deadline_ms=deadline(now);state_unlock(s);return ESP_OK;}
     if(strcmp(event,"get_device_info")==0){const char*const k[]={"event"};return exact_keys(&o,k,1)?send_device_info(s):send_error(s,"get_device_info","invalid_request");}
+    if(strcmp(event,"vk_audio_diagnostics")==0)return dispatch_audio_diagnostics(s,&o);
     if(strcmp(event,"ui_state")==0){const char*const k[]={"event","state","text"};char state[16];bool has_state=string_copy_value(&o,"state",state,sizeof(state));uint16_t text_node=member_node(&o,"text");bool valid=has_state&&(strcmp(state,"ready")==0||strcmp(state,"thinking")==0||strcmp(state,"listening")==0||strcmp(state,"processing")==0||strcmp(state,"error")==0);return exact_keys(&o,k,3)&&valid&&text_node!=VK_USB_JSON_NO_NODE&&vk_usb_json_kind(o.document,text_node)==VK_USB_JSON_STRING?ESP_OK:send_error(s,"ui_state","invalid_request");}
     if(strcmp(event,"interaction_mode")==0||strcmp(event,"voice_key")==0){
         vk_usb_input_command_t c={.expected_epoch=0};
@@ -791,6 +861,7 @@ bool vk_usb_service_has_epoch(vk_usb_service_t*s){if(!s)return false;state_lock(
 void vk_usb_service_set_epoch_for_test(vk_usb_service_t*s,uint32_t e){if(s){state_lock(s);s->epoch=e;state_unlock(s);}}size_t vk_usb_service_tx_queue_count_for_test(vk_usb_service_t*s){if(!s)return 0;state_lock(s);size_t n=s->tx_count;state_unlock(s);return n;}esp_err_t vk_usb_service_consume_for_test(vk_usb_service_t*s,const uint8_t*b,size_t n){return !s||(!b&&n)?ESP_ERR_INVALID_ARG:consume(s,b,n);}void vk_usb_service_set_before_tx_commit_hook_for_test(vk_usb_service_t*s,vk_usb_before_tx_commit_hook_t hook,void*context){if(s){state_lock(s);s->before_tx_commit_hook=hook;s->before_tx_commit_context=context;state_unlock(s);}}size_t vk_usb_service_consume_bytes_for_test(vk_usb_service_t*s){if(!s)return 0;state_lock(s);size_t n=s->consume_bytes;state_unlock(s);return n;}size_t vk_usb_service_parser_steps_for_test(vk_usb_service_t*s){if(!s)return 0;state_lock(s);size_t n=s->parser_steps;state_unlock(s);return n;}
 #endif
 esp_err_t vk_usb_service_register_capability_provider(vk_usb_service_t*s,const vk_usb_capability_provider_registration_t*r){if(!s||!r||!r->get_snapshot)return ESP_ERR_INVALID_ARG;state_lock(s);if(s->installed||s->capability_provider.get_snapshot){state_unlock(s);return ESP_ERR_INVALID_STATE;}s->capability_provider=*r;state_unlock(s);return ESP_OK;}
+esp_err_t vk_usb_service_register_audio_diagnostics_provider(vk_usb_service_t*s,const vk_usb_audio_diagnostics_provider_registration_t*r){if(!s||!r||!r->get_snapshot)return ESP_ERR_INVALID_ARG;state_lock(s);if(s->installed||s->audio_diagnostics_provider.get_snapshot){state_unlock(s);return ESP_ERR_INVALID_STATE;}s->audio_diagnostics_provider=*r;state_unlock(s);return ESP_OK;}
 esp_err_t vk_usb_service_register_asset_handler(vk_usb_service_t*s,const vk_usb_asset_handler_registration_t*r){if(!s||!r||!r->handle_command||!r->handle_chunk||r->chunk_bytes==0||r->chunk_bytes>VK_USB_ASSET_CHUNK_MAX_BYTES||r->max_asset_bytes==0)return ESP_ERR_INVALID_ARG;state_lock(s);if(s->installed||s->asset_handler.handle_command){state_unlock(s);return ESP_ERR_INVALID_STATE;}s->asset_handler=*r;state_unlock(s);return ESP_OK;}
 esp_err_t vk_usb_service_register_screen_handler(vk_usb_service_t*s,const vk_usb_screen_handler_registration_t*r){if(!s||!r||!r->handle_command)return ESP_ERR_INVALID_ARG;state_lock(s);if(s->installed||s->screen_handler.handle_command){state_unlock(s);return ESP_ERR_INVALID_STATE;}s->screen_handler=*r;state_unlock(s);return ESP_OK;}
 esp_err_t vk_usb_service_register_widget_handler(vk_usb_service_t*s,const vk_usb_widget_handler_registration_t*r){if(!s||!r||!r->handle_command)return ESP_ERR_INVALID_ARG;state_lock(s);if(s->installed||s->widget_handler.handle_command){state_unlock(s);return ESP_ERR_INVALID_STATE;}s->widget_handler=*r;state_unlock(s);return ESP_OK;}

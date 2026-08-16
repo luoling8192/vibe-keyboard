@@ -62,6 +62,15 @@ def validate_build():
     if "#define CONFIG_SPIFFS_OBJ_NAME_LEN 96" not in compiled_config:
         print("ERROR: Refusing to flash a build with truncated SPIFFS asset names")
         return False
+    composite_usb_contract = (
+        "#define CONFIG_USB_DEVICE_UAC_AS_PART 1",
+        "#define CONFIG_UAC_MIC_CHANNEL_NUM 1",
+        "#define CONFIG_UAC_SAMPLE_RATE 16000",
+        "#define CONFIG_UAC_SUPPORT_MACOS 1",
+    )
+    if any(item not in compiled_config for item in composite_usb_contract):
+        print("ERROR: Refusing to flash a build without the admitted CDC/UAC microphone profile")
+        return False
     panic_modes = (
         "#define CONFIG_ESP_SYSTEM_PANIC_SILENT_REBOOT 1",
         "#define CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT 1",

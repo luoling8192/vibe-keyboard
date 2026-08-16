@@ -105,6 +105,14 @@ argument line is passed as one literal argument.
 
 ## Use the Microphone
 
+After installing the composite firmware, macOS lists `VibeBoard Microphone` as
+a standard 16 kHz mono input. It can be selected directly in System Settings or
+any CoreAudio application; the VibeBoard app does not need to be running for
+that path.
+
+The app's existing Opus recording workflow is also retained, but it cannot own
+the microphone while another macOS application has the UAC input open:
+
 1. Open `Audio`.
 2. Select one physical voice key.
 3. Enable recording storage if required.

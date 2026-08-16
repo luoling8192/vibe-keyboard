@@ -32,7 +32,6 @@ struct RootView: View {
         switch model.selectedPage {
         case .device: DevicePage(model: model)
         case .screen: ScreenPage(model: model)
-        case .pets: PetsPage(model: model)
         case .keys: KeysPage(model: model)
         case .audio: AudioPage(model: model)
         case .firmware: FirmwarePage(model: model)
@@ -49,6 +48,11 @@ private struct DevicePreview: View {
     private struct PreviewLabel {
         let text: String
         let colorRGB888: UInt32
+    }
+
+    private struct PreviewGauge {
+        let percent: Int
+        let backgroundRGB888: UInt32
     }
 
     let mode: String
@@ -86,12 +90,42 @@ private struct DevicePreview: View {
     @ViewBuilder private func layoutPreview(_ layout: ScreenLayout, size: CGSize) -> some View {
         let placements = (try? ScreenLayoutGeometry.placements(layout)) ?? []
         let labels = previewLabels(layout)
+        let gauges = previewGauges(layout)
         let sx = size.width / 428
         let sy = size.height / 142
         ZStack(alignment: .topLeading) {
             color(layout.backgroundRGB888)
             ForEach(Array(placements.enumerated()), id: \.offset) { _, placement in
-                if let label = labels[placement.id] {
+                if let gauge = gauges[placement.id] {
+                    ZStack {
+                        Circle()
+                            .stroke(
+                                color(gauge.backgroundRGB888),
+                                lineWidth: max(3, 7 * sy)
+                            )
+                        Circle()
+                            .trim(from: 0, to: CGFloat(gauge.percent) / 100)
+                            .stroke(
+                                gaugeColor(gauge.percent),
+                                style: StrokeStyle(
+                                    lineWidth: max(3, 7 * sy),
+                                    lineCap: .round
+                                )
+                            )
+                            .rotationEffect(.degrees(-90))
+                        Text("\(gauge.percent)%")
+                            .font(.system(size: max(7, 12 * sy), design: .monospaced))
+                            .foregroundStyle(.white)
+                    }
+                    .frame(
+                        width: CGFloat(placement.rect.width) * sx,
+                        height: CGFloat(placement.rect.height) * sy
+                    )
+                    .offset(
+                        x: CGFloat(placement.rect.x) * sx,
+                        y: CGFloat(placement.rect.y) * sy
+                    )
+                } else if let label = labels[placement.id] {
                     Text(label.text)
                         .font(.system(
                             size: max(7, 13 * sy),
@@ -99,12 +133,12 @@ private struct DevicePreview: View {
                             design: .monospaced
                         ))
                         .foregroundStyle(color(label.colorRGB888))
-                        .lineLimit(1)
+                        .lineLimit(label.text.contains("\n") ? 4 : 1)
                         .minimumScaleFactor(0.5)
                         .frame(
                             width: CGFloat(placement.rect.width) * sx,
                             height: CGFloat(placement.rect.height) * sy,
-                            alignment: .leading
+                            alignment: .topLeading
                         )
                         .offset(
                             x: CGFloat(placement.rect.x) * sx,
@@ -149,23 +183,68 @@ private struct DevicePreview: View {
         func collect(_ node: ScreenObjectNode) {
             switch node {
             case .staticLabel(let base, _, let color, _, let text):
-                labels[base.id] = .init(text: text, colorRGB888: color)
+                if base.visible {
+                    labels[base.id] = .init(text: text, colorRGB888: color)
+                }
             case .dynamicLabel(let base, _, let color, _, let widgetID):
-                if let text = widgetFallbacks[widgetID] {
+                if base.visible, let text = widgetFallbacks[widgetID] {
                     labels[base.id] = .init(text: text, colorRGB888: color)
                 }
             case .iconText(let base, let color, _, _, _, let widgetID):
                 if let text = widgetFallbacks[widgetID] {
                     labels[base.id] = .init(text: text, colorRGB888: color)
                 }
+            case .pet(let base, _, _, _):
+                if base.visible {
+                    labels[base.id] = .init(text: "PET", colorRGB888: 0x6ED0FF)
+                }
             case .container(_, _, _, _, _, let children):
                 children.forEach(collect)
-            case .image, .pet, .glyphLabel, .progress:
+            case .image, .glyphLabel, .progress:
                 break
             }
         }
         layout.objects.forEach { collect($0.node) }
         return labels
+    }
+
+    private func previewGauges(_ layout: ScreenLayout) -> [String: PreviewGauge] {
+        var widgetFallbacks: [String: Int] = [:]
+        for declaration in layout.widgets {
+            guard case .progress(let id, _, _, _, _, _) = declaration,
+                  let fallback = try? WidgetPreviewFormatter.fallback(declaration),
+                  let percent = Int(fallback) else {
+                continue
+            }
+            widgetFallbacks[id] = min(max(percent, 0), 100)
+        }
+
+        var gauges: [String: PreviewGauge] = [:]
+        func collect(_ node: ScreenObjectNode) {
+            switch node {
+            case .progress(let base, let background, _, let widgetID):
+                if base.visible, let percent = widgetFallbacks[widgetID] {
+                    gauges[base.id] = .init(
+                        percent: percent,
+                        backgroundRGB888: background
+                    )
+                }
+            case .container(_, _, _, _, _, let children):
+                children.forEach(collect)
+            default:
+                break
+            }
+        }
+        layout.objects.forEach { collect($0.node) }
+        return gauges
+    }
+
+    private func gaugeColor(_ percent: Int) -> Color {
+        let colors: [UInt32] = [
+            0x32D74B, 0x73C944, 0xA8C83A, 0xD7B83B,
+            0xF39A3D, 0xFF6B3D, 0xFF453A,
+        ]
+        return color(colors[min(max(percent, 0) / 15, colors.count - 1)])
     }
 
     private func color(_ rgb: UInt32) -> Color {
@@ -247,6 +326,8 @@ private struct DevicePage: View {
 private struct ScreenPage: View {
     @ObservedObject var model: AppModel
     @State private var importerPresented = false
+    @State private var petImporterPresented = false
+    @State private var petSheetPresented = false
 
     var body: some View {
         ScrollView {
@@ -266,6 +347,11 @@ private struct ScreenPage: View {
         .fileImporter(isPresented: $importerPresented, allowedContentTypes: [.image]) { result in
             if case .success(let url) = result { model.importAndUpload(url: url) }
         }
+        .fileImporter(isPresented: $petImporterPresented, allowedContentTypes: [.gif, .png]) { result in
+            if case .success(let url) = result {
+                model.importAndUpload(url: url, pet: true)
+            }
+        }
     }
 
     private var inspector: some View {
@@ -273,9 +359,7 @@ private struct ScreenPage: View {
             Text("Mode").font(.headline)
             Picker("Mode", selection: $model.screenMode) {
                 Text("Image").tag(ScreenMode.image)
-                Text("Pet").tag(ScreenMode.pet)
                 Text("Dashboard").tag(ScreenMode.dashboard)
-                Text("Custom").tag(ScreenMode.custom)
             }.pickerStyle(.radioGroup)
             Divider()
             Button("Query device screen") { model.queryScreen() }.disabled(!model.screenCapability.isAvailable)
@@ -283,29 +367,32 @@ private struct ScreenPage: View {
             case .image:
                 Button("Commit uploaded image") { model.activateUploadedImage() }
                     .disabled(!model.canSendScreen || model.lastUploadedAsset?.kind != .image)
-            case .pet:
-                Button("Commit pet states") { model.activateUploadedPet() }
-                    .disabled(!model.canSendScreen || model.lastUploadedAsset?.kind != .animation)
-            case .dashboard:
-                Text("Two tiles are shown at once. Page A and Page B rotate automatically.")
+            case .pet, .dashboard, .custom:
+                Text("Two tiles are shown at once. Add as many rotating pages as you need.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                ForEach(0..<4, id: \.self) { index in
-                    Picker(
-                        Self.dashboardSlotLabels[index],
-                        selection: Binding(
-                            get: {
-                                LiveDashboardSnapshot
-                                    .normalizedModules(model.dashboardModules)[index]
-                            },
-                            set: { model.setDashboardModule($0, at: index) }
-                        )
-                    ) {
-                        ForEach(DashboardModule.allCases) { module in
-                            Text(module.label).tag(module)
+                ForEach(model.dashboardPages, id: \.index) { page in
+                    GroupBox("Page \(page.index + 1)") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            dashboardModulePicker(
+                                "Left",
+                                index: page.index * 2
+                            )
+                            dashboardModulePicker(
+                                "Right",
+                                index: page.index * 2 + 1
+                            )
+                            dashboardPagePreview(page: page)
+                            if model.dashboardPages.count > 1 {
+                                Button("Remove page", role: .destructive) {
+                                    model.removeDashboardPage(at: page.index)
+                                }
+                                .buttonStyle(.link)
+                            }
                         }
                     }
                 }
+                Button("Add page") { model.addDashboardPage() }
                 Picker("Page rotation", selection: $model.dashboardPageDurationSeconds) {
                     ForEach([4, 6, 8, 10, 12], id: \.self) { seconds in
                         Text("\(seconds) seconds").tag(seconds)
@@ -315,158 +402,127 @@ private struct ScreenPage: View {
                     "Stocks, up to 12 (sh000001,hk00700,usAAPL)",
                     text: $model.stockSymbols
                 )
+                dashboardPetPicker
                 HStack {
                     Button("Save") { model.saveDashboardSettings() }
                     Button(model.liveDashboardEnabled ? "Reinstall" : "Install & start") {
                         model.saveDashboardSettings()
                         model.activateLiveDashboard()
                     }
-                    .disabled(!model.canSendScreen)
+                    .disabled(
+                        !model.canSendScreen ||
+                        (
+                            model.dashboardModules.contains(.pet) &&
+                            model.lastUploadedAsset?.kind != .animation
+                        )
+                    )
                 }
                 if model.liveDashboardEnabled {
                     Button("Pause live updates") { model.stopLiveDashboard() }
                 }
-                dashboardPagePreview("Page A", page: model.dashboardPageA)
-                dashboardPagePreview("Page B", page: model.dashboardPageB)
-                Text("Stock tiles show two quotes and advance every 4 seconds.")
+                Text("Stock tiles show up to four quotes and advance every 4 seconds.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Pet is a regular page module and can be placed in any tile.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("Codex quota comes from the installed Codex CLI. Claude daily tokens come from local session logs. Credentials are not copied to the device.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            case .custom:
-                TextField("Title (printable ASCII)", text: $model.layoutTitle)
-                TextField("Status (printable ASCII)", text: $model.widgetText)
-                Button("Commit custom layout") { model.activateLayout(mode: .custom) }
-                    .disabled(!model.canSendScreen)
-                Button("Send widget update") { model.sendStatusWidget() }
-                    .disabled(model.availableScreen?.configured != true)
-                Text("Use Image mode for Unicode text or fully custom artwork.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
             Text(model.screenCapability.label).font(.caption).foregroundStyle(.secondary)
         }.padding().background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private static let dashboardSlotLabels = [
-        "Page A · Left",
-        "Page A · Right",
-        "Page B · Left",
-        "Page B · Right",
-    ]
-
-    private func dashboardPagePreview(
-        _ title: String,
-        page: DashboardPageContent
-    ) -> some View {
-        GroupBox(title) {
-            HStack(alignment: .top, spacing: 10) {
-                dashboardTilePreview(page.left)
-                Divider()
-                dashboardTilePreview(page.right)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func dashboardTilePreview(_ tile: DashboardTileContent) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(tile.title).fontWeight(.semibold)
-            Text(tile.line1)
-            Text(tile.line2).foregroundStyle(.secondary)
-        }
-        .font(.system(.caption2, design: .monospaced))
-        .lineLimit(1)
-        .minimumScaleFactor(0.65)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct PetsPage: View {
-    @ObservedObject var model: AppModel
-    @State private var importerPresented = false
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+    private var dashboardPetPicker: some View {
+        GroupBox("Dashboard Pet") {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    PageTitle(title: "Pets")
+                    Button("Choose pet…") { petSheetPresented = true }
+                        .disabled(model.pets.isEmpty)
                     Spacer()
-                    Button("Refresh Petdex") { model.refreshPetdex() }
-                    Button("Import GIF/APNG") { importerPresented = true }
-                        .disabled(!model.canUploadAssets)
+                    Button("Refresh") { model.refreshPetdex() }
                 }
-                TextField("Search local and Petdex pets", text: $model.petSearch)
-                HStack(alignment: .top, spacing: 20) {
-                    List(model.filteredPets, selection: $model.selectedPetID) { pet in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(pet.displayName)
-                            Text(pet.attribution)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .tag(pet.id)
+                if let pet = model.selectedPet {
+                    HStack(spacing: 6) {
+                        Image(systemName: model.uploadedPetID == pet.id
+                            ? "checkmark.circle.fill"
+                            : "pawprint.fill")
+                            .foregroundStyle(model.uploadedPetID == pet.id ? .green : .secondary)
+                        Text(pet.displayName).font(.callout.weight(.semibold))
                     }
-                    .frame(minWidth: 300, idealWidth: 360, minHeight: 280)
-
-                    petInspector
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    Text(pet.attribution)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("No pet selected")
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
                 }
-                Text(model.upload.label).foregroundStyle(.secondary)
-                Text(model.petCatalogStatus).foregroundStyle(.secondary)
-                Text("Storage: \(model.assetStorageLabel)")
-                    .foregroundStyle(model.canUploadAssets ? Color.secondary : Color.orange)
-                Text("Petdex entries are user-submitted. The app downloads the selected spritesheet on demand and keeps its submitter attribution; assets are not bundled into this repository.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }.padding(24)
-        }
-        .fileImporter(isPresented: $importerPresented, allowedContentTypes: [.gif, .png]) { result in
-            if case .success(let url) = result { model.importAndUpload(url: url, pet: true) }
-        }
-    }
-
-    @ViewBuilder private var petInspector: some View {
-        if let pet = model.selectedPet {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(pet.displayName).font(.title2.bold())
-                LabeledContent("Source", value: pet.source.label)
-                LabeledContent("Attribution", value: pet.submittedBy ?? "Local")
-                LabeledContent("Kind", value: pet.kind)
                 Picker("Animation", selection: $model.petAnimationChoice) {
                     ForEach(PetAnimationChoice.allCases) { choice in
                         Text(choice.label).tag(choice)
                     }
                 }
-                .frame(maxWidth: 260)
-                Text("The selected row is converted to the device's bounded animation format and loops as the pet's idle state.")
+                Button("Upload selected") { model.downloadSelectedPet() }
+                    .disabled(model.selectedPet == nil || !model.canUploadAssets)
+                Button("Import GIF/APNG…") { petImporterPresented = true }
+                    .disabled(!model.canUploadAssets)
+                Text(model.petCatalogStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                HStack {
-                    Button("Download & upload") { model.downloadSelectedPet() }
-                        .disabled(!model.canUploadAssets)
-                    Button("Commit to display") { model.activateUploadedPet() }
-                        .disabled(
-                            !model.canSendScreen ||
-                            model.lastUploadedAsset?.kind != .animation ||
-                            (model.uploadedPetID != nil && model.uploadedPetID != pet.id)
-                        )
-                }
-                DevicePreview(
-                    mode: "Pet",
-                    pixels: model.previewPixels,
-                    layout: nil
-                )
             }
+        }
+        .sheet(isPresented: $petSheetPresented) {
+            PetPickerSheet(model: model)
+        }
+    }
+
+    @ViewBuilder private func dashboardModulePicker(
+        _ label: String,
+        index: Int
+    ) -> some View {
+        Picker(
+            label,
+            selection: Binding(
+                get: {
+                    LiveDashboardSnapshot
+                        .normalizedModules(model.dashboardModules)[index]
+                },
+                set: { model.setDashboardModule($0, at: index) }
+            )
+        ) {
+            ForEach(DashboardModule.allCases) { module in
+                Text(module.label).tag(module)
+            }
+        }
+    }
+
+    private func dashboardPagePreview(page: DashboardPageContent) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            dashboardTilePreview(page.left)
+            Divider()
+            dashboardTilePreview(page.right)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder private func dashboardTilePreview(_ tile: DashboardTileContent) -> some View {
+        if tile.module == .pet {
+            Text("PET")
+                .font(.system(.caption2, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            VStack(spacing: 10) {
-                Image(systemName: "pawprint")
-                    .font(.largeTitle)
-                    .foregroundStyle(.secondary)
-                Text("Select a pet").font(.headline)
-                Text("Local Codex pets load automatically. Refresh Petdex for the public catalog.")
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, minHeight: 280)
+        VStack(alignment: .leading, spacing: 3) {
+            Text(tile.title).fontWeight(.semibold)
+                ForEach(Array(tile.lines.prefix(4).enumerated()), id: \.offset) { _, line in
+                    Text(line).foregroundStyle(.secondary)
+                }
+        }
+        .font(.system(.caption2, design: .monospaced))
+        .lineLimit(1)
+        .minimumScaleFactor(0.65)
+        .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }
@@ -481,6 +537,7 @@ private struct KeysPage: View {
     @State private var shortcutFunction = false
     @State private var shortcutOption = false
     @State private var shortcutShift = false
+    @State private var heldKey = "right_command"
     @State private var commandExecutable = "/usr/bin/open"
     @State private var commandArguments = "-a\nTextEdit"
     @State private var commandTimeout = "5000"
@@ -524,7 +581,9 @@ private struct KeysPage: View {
 
                         Picker("Action", selection: actionChoice) {
                             ForEach(ActionChoice.allCases, id: \.self) { choice in
-                                Text(choice.label).tag(choice)
+                                Text(choice.label)
+                                    .tag(choice)
+                                    .disabled(choice == .holdKey && selectedGesture != .single)
                             }
                         }
                         .frame(maxWidth: 360)
@@ -544,6 +603,7 @@ private struct KeysPage: View {
                 }
                 HStack {
                     Button("Test selected action") { model.testAction(currentAction) }
+                        .disabled(currentAction.isHeldKey)
                     Button("Clear selected gesture") {
                         model.setAction(.none, for: model.selectedKey, gesture: selectedGesture)
                     }
@@ -583,6 +643,16 @@ private struct KeysPage: View {
                 model.setAction(.pasteText(textDraft), for: model.selectedKey, gesture: selectedGesture)
             }
             .disabled(textDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        case .holdKey:
+            TextField("Key (right_command, f2, space, a…)", text: $heldKey)
+                .frame(maxWidth: 320)
+            Button("Apply held key") {
+                model.setAction(.holdKey(heldKey), for: model.selectedKey, gesture: selectedGesture)
+            }
+            .disabled(!heldKeyIsValid)
+            Text("The selected key is held while the physical button is down. Use left_command, right_command, left_shift, right_shift, left_option, right_option, left_control, right_control, fn, a–z, 0–9, F1–F20, space, arrows, or return.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .customShortcut:
             TextField("Key (1, fn, f1…f20, home, pageup)", text: $shortcutKey)
                 .frame(maxWidth: 240)
@@ -657,6 +727,10 @@ private struct KeysPage: View {
         ProductionHostActionAdapter.keyCode(forShortcutKey: shortcutKey) != nil
     }
 
+    private var heldKeyIsValid: Bool {
+        ProductionHostActionAdapter.supportsHeldKey(heldKey)
+    }
+
     private var commandIsValid: Bool {
         commandExecutable.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") &&
         UInt32(commandTimeout).map { $0 > 0 && $0 <= 300_000 } == true
@@ -694,6 +768,8 @@ private struct KeysPage: View {
             shortcutFunction = shortcut.modifiers.contains(.function)
             shortcutOption = shortcut.modifiers.contains(.option)
             shortcutShift = shortcut.modifiers.contains(.shift)
+        case .holdKey(let key):
+            heldKey = key
         case .customCommand(let command):
             commandExecutable = command.executable
             commandArguments = command.arguments.joined(separator: "\n")
@@ -708,7 +784,7 @@ private struct KeysPage: View {
 
 private enum ActionChoice: String, CaseIterable, Hashable {
     case none, voice, enter, copy, interrupt, wake, paste, shortcut, command, launch
-    case screenImage, screenPet, screenDashboard, screenCustom
+    case holdKey, screenImage, screenDashboard, dashboardNextPage, dashboardNextStocks
 
     init(_ action: HostAction) {
         switch action {
@@ -718,13 +794,15 @@ private enum ActionChoice: String, CaseIterable, Hashable {
         case .interruptControlC: self = .interrupt
         case .wakeApplication: self = .wake
         case .pasteText: self = .paste
+        case .holdKey: self = .holdKey
         case .customShortcut: self = .shortcut
         case .customCommand: self = .command
         case .launchApplication: self = .launch
         case .screenMode(.image): self = .screenImage
-        case .screenMode(.pet): self = .screenPet
         case .screenMode(.dashboard): self = .screenDashboard
-        case .screenMode(.custom): self = .screenCustom
+        case .screenMode(.pet), .screenMode(.custom): self = .screenDashboard
+        case .dashboardNextPage: self = .dashboardNextPage
+        case .dashboardNextStocks: self = .dashboardNextStocks
         default: self = .none
         }
     }
@@ -738,13 +816,14 @@ private enum ActionChoice: String, CaseIterable, Hashable {
         case .interrupt: "Interrupt"
         case .wake: "Wake application"
         case .paste: "Paste text"
+        case .holdKey: "Hold single key"
         case .shortcut: "Custom shortcut"
         case .command: "Run command"
         case .launch: "Launch application"
         case .screenImage: "Open image controls"
-        case .screenPet: "Open pet controls"
         case .screenDashboard: "Open dashboard controls"
-        case .screenCustom: "Open custom screen controls"
+        case .dashboardNextPage: "Next dashboard page"
+        case .dashboardNextStocks: "Next stock page"
         }
     }
 
@@ -757,6 +836,7 @@ private enum ActionChoice: String, CaseIterable, Hashable {
         case .interrupt: .interruptControlC
         case .wake: .wakeApplication
         case .paste: .pasteText("Text")
+        case .holdKey: .holdKey("right_command")
         case .shortcut:
             (try? VibeBoardKit.KeyboardShortcut(modifiers: [.command], key: "k"))
                 .map { .customShortcut($0) } ?? .none
@@ -765,10 +845,17 @@ private enum ActionChoice: String, CaseIterable, Hashable {
                 .map { .customCommand($0) } ?? .none
         case .launch: .launchApplication(bundleIdentifier: "com.apple.TextEdit")
         case .screenImage: .screenMode(.image)
-        case .screenPet: .screenMode(.pet)
         case .screenDashboard: .screenMode(.dashboard)
-        case .screenCustom: .screenMode(.custom)
+        case .dashboardNextPage: .dashboardNextPage
+        case .dashboardNextStocks: .dashboardNextStocks
         }
+    }
+}
+
+private extension HostAction {
+    var isHeldKey: Bool {
+        if case .holdKey = self { return true }
+        return false
     }
 }
 

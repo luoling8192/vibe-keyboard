@@ -15,6 +15,7 @@ public protocol InputInjecting: Sendable {
     func interruptControlC() async throws
     func pasteText(_ text: String) async throws
     func sendShortcut(_ shortcut: KeyboardShortcut) async throws
+    func setHeldKey(_ key: String, pressed: Bool) async throws
 }
 
 public protocol ApplicationControlling: Sendable {
@@ -28,6 +29,8 @@ public protocol VoiceInputControlling: Sendable {
 
 public protocol ScreenControlling: Sendable {
     func activate(mode: ScreenMode) async throws
+    func advanceDashboardPage() async throws
+    func advanceDashboardStocks() async throws
     func interactWithPet(_ interaction: String) async throws
 }
 
@@ -120,6 +123,8 @@ public actor KeyActionRouter {
             }
             try await requireInputPermission()
             try await input.pasteText(text)
+        case .holdKey:
+            return .noAction
         case let .customShortcut(shortcut):
             try await requireInputPermission()
             try await input.sendShortcut(shortcut)
@@ -132,6 +137,10 @@ public actor KeyActionRouter {
             try await applications.launchApplication(bundleIdentifier: bundleIdentifier)
         case let .screenMode(mode):
             try await screen.activate(mode: mode)
+        case .dashboardNextPage:
+            try await screen.advanceDashboardPage()
+        case .dashboardNextStocks:
+            try await screen.advanceDashboardStocks()
         case let .petInteraction(interaction):
             guard !interaction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw InputConfigurationError.missingAssociatedValue(action: "petInteraction")
@@ -139,6 +148,11 @@ public actor KeyActionRouter {
             try await screen.interactWithPet(interaction)
         }
         return .completed
+    }
+
+    public func setHeldKey(_ key: String, pressed: Bool) async throws {
+        try await requireInputPermission()
+        try await input.setHeldKey(key, pressed: pressed)
     }
 
     private func requireInputPermission() async throws {

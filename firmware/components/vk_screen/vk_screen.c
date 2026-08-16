@@ -68,6 +68,61 @@ static bool int16_value(const vk_usb_json_document_t *document, uint16_t node, i
     return true;
 }
 
+static bool number_milli_value(
+    const vk_usb_json_document_t *document,
+    uint16_t node,
+    int64_t *output
+)
+{
+    size_t start, end;
+    if (document == NULL || output == NULL ||
+        vk_usb_json_kind(document, node) != VK_USB_JSON_NUMBER ||
+        !vk_usb_json_node_range(document, node, &start, &end) || start >= end) {
+        return false;
+    }
+    bool negative = document->bytes[start] == '-';
+    if (negative && ++start == end) return false;
+    uint64_t whole = 0U;
+    uint64_t fraction = 0U;
+    uint8_t scale = 0U;
+    size_t offset = start;
+    if (document->bytes[offset] == '0') {
+        ++offset;
+    } else {
+        if (document->bytes[offset] < '1' || document->bytes[offset] > '9') return false;
+        while (offset < end && document->bytes[offset] >= '0' &&
+               document->bytes[offset] <= '9') {
+            uint8_t digit = (uint8_t)(document->bytes[offset++] - '0');
+            if (whole > (UINT64_MAX - digit) / 10U) return false;
+            whole = whole * 10U + digit;
+        }
+    }
+    if (offset < end && document->bytes[offset] == '.') {
+        ++offset;
+        while (offset < end && document->bytes[offset] >= '0' &&
+               document->bytes[offset] <= '9' && scale < 3U) {
+            fraction = fraction * 10U +
+                       (uint8_t)(document->bytes[offset++] - '0');
+            ++scale;
+        }
+        if (scale == 0U) return false;
+    }
+    if (offset != end || whole > (UINT64_MAX - fraction) / 1000U) return false;
+    while (scale < 3U) {
+        fraction *= 10U;
+        ++scale;
+    }
+    uint64_t magnitude = whole * 1000U + fraction;
+    if ((!negative && magnitude > INT64_MAX) ||
+        (negative && magnitude > (uint64_t)INT64_MAX + 1U)) {
+        return false;
+    }
+    *output = negative
+        ? (magnitude == (uint64_t)INT64_MAX + 1U ? INT64_MIN : -(int64_t)magnitude)
+        : (int64_t)magnitude;
+    return true;
+}
+
 static bool valid_identifier(const char *value)
 {
     size_t length = value == NULL ? 0U : strlen(value);
@@ -167,7 +222,7 @@ static bool widget_id_unique(const vk_screen_model_t *model, const char *id)
 
 static bool scalar_supported(uint32_t scalar)
 {
-    return scalar >= 0x20U && scalar <= 0x7eU;
+    return scalar == 0x0aU || (scalar >= 0x20U && scalar <= 0x7eU);
 }
 
 static bool text_supported(const char *text)
@@ -388,12 +443,16 @@ static esp_err_t parse_object(model_builder_t *builder, uint16_t node, bool root
             !(strcmp(fit,"contain")==0||strcmp(fit,"cover")==0||strcmp(fit,"stretch")==0||strcmp(fit,"center")==0) ||
             !uint32_value(builder->document,find(builder->document,node,"background_rgb888"),0xffffffU,false,&rgb)) return ESP_ERR_INVALID_ARG;
         snprintf(object->sha256,sizeof(object->sha256),"%s",sha);object->background_rgb888=rgb;
+        object->fit=strcmp(fit,"contain")==0?0U:strcmp(fit,"cover")==0?1U:strcmp(fit,"stretch")==0?2U:3U;
         return add_charge(builder,sha,VK_VKA1_IMAGE,false);
     }
     if (object->type == VK_SCREEN_OBJECT_PET) {
         if (!string_value(builder->document,find(builder->document,node,"fit"),fit,sizeof(fit)) ||
+            !(strcmp(fit,"contain")==0||strcmp(fit,"cover")==0||strcmp(fit,"stretch")==0||strcmp(fit,"center")==0) ||
             !uint32_value(builder->document,find(builder->document,node,"background_rgb888"),0xffffffU,false,&rgb)) return ESP_ERR_INVALID_ARG;
-        object->background_rgb888=rgb;return parse_pet_states(builder,find(builder->document,node,"pet"),object->sha256);
+        object->background_rgb888=rgb;
+        object->fit=strcmp(fit,"contain")==0?0U:strcmp(fit,"cover")==0?1U:strcmp(fit,"stretch")==0?2U:3U;
+        return parse_pet_states(builder,find(builder->document,node,"pet"),object->sha256);
     }
     if (object->type == VK_SCREEN_OBJECT_STATIC_LABEL || object->type == VK_SCREEN_OBJECT_DYNAMIC_LABEL) {
         if (!font_valid(builder->screen,builder->document,find(builder->document,node,"font")) ||
@@ -449,7 +508,7 @@ static esp_err_t parse_widgets(model_builder_t *builder, uint16_t widgets_node)
         vk_screen_widget_t *widget=&builder->model->widgets[builder->model->widget_count];memset(widget,0,sizeof(*widget));
         if(strcmp(type,"text")==0){const char*const keys[]={"fallback","id","target","type"};if(!exact(builder->document,node,keys,4U)||!string_value(builder->document,find(builder->document,node,"fallback"),widget->fallback_text,sizeof(widget->fallback_text))||strlen(widget->fallback_text)>builder->screen->config.capability.max_widget_value_bytes||!text_supported(widget->fallback_text))return ESP_ERR_INVALID_ARG;widget->type=VK_SCREEN_WIDGET_TEXT;}
         else if(strcmp(type,"integer")==0){const char*const keys[]={"fallback","id","target","type"};int64_t value;if(!exact(builder->document,node,keys,4U)||vk_usb_json_int64(builder->document,find(builder->document,node,"fallback"),INT64_MIN,INT64_MAX,&value)!=VK_USB_JSON_OK)return ESP_ERR_INVALID_ARG;widget->type=VK_SCREEN_WIDGET_INTEGER;widget->fallback_milli=value;}
-        else if(strcmp(type,"number")==0||strcmp(type,"progress")==0){const char*const keys[]={"fallback","format","id","max","min","target","type"};const char*const format_keys[]={"decimals"};int64_t min,max,fallback;uint32_t decimals;uint16_t format=find(builder->document,node,"format");if(!exact(builder->document,node,keys,7U)||!exact(builder->document,format,format_keys,1U)||vk_usb_json_int64(builder->document,find(builder->document,node,"min"),INT64_MIN,INT64_MAX,&min)!=VK_USB_JSON_OK||vk_usb_json_int64(builder->document,find(builder->document,node,"max"),INT64_MIN,INT64_MAX,&max)!=VK_USB_JSON_OK||vk_usb_json_int64(builder->document,find(builder->document,node,"fallback"),INT64_MIN,INT64_MAX,&fallback)!=VK_USB_JSON_OK||!uint32_value(builder->document,find(builder->document,format,"decimals"),3U,false,&decimals)||min>=max||fallback<min||fallback>max)return ESP_ERR_INVALID_ARG;widget->type=strcmp(type,"number")==0?VK_SCREEN_WIDGET_NUMBER:VK_SCREEN_WIDGET_PROGRESS;widget->minimum_milli=min;widget->maximum_milli=max;widget->fallback_milli=fallback;widget->decimals=(uint8_t)decimals;}
+        else if(strcmp(type,"number")==0||strcmp(type,"progress")==0){const char*const keys[]={"fallback","format","id","max","min","target","type"};const char*const format_keys[]={"decimals"};int64_t min,max,fallback;uint32_t decimals;uint16_t format=find(builder->document,node,"format");if(!exact(builder->document,node,keys,7U)||!exact(builder->document,format,format_keys,1U)||!number_milli_value(builder->document,find(builder->document,node,"min"),&min)||!number_milli_value(builder->document,find(builder->document,node,"max"),&max)||!number_milli_value(builder->document,find(builder->document,node,"fallback"),&fallback)||!uint32_value(builder->document,find(builder->document,format,"decimals"),3U,false,&decimals)||min>=max||fallback<min||fallback>max)return ESP_ERR_INVALID_ARG;widget->type=strcmp(type,"number")==0?VK_SCREEN_WIDGET_NUMBER:VK_SCREEN_WIDGET_PROGRESS;widget->minimum_milli=min;widget->maximum_milli=max;widget->fallback_milli=fallback;widget->decimals=(uint8_t)decimals;}
         else return ESP_ERR_NOT_SUPPORTED;
         if(!string_value(builder->document,find(builder->document,node,"id"),widget->id,sizeof(widget->id))||!string_value(builder->document,find(builder->document,node,"target"),widget->target,sizeof(widget->target))||!valid_identifier(widget->id)||!valid_identifier(widget->target)||!widget_id_unique(builder->model,widget->id))return ESP_ERR_INVALID_ARG;
         uint16_t matches=0U;vk_screen_object_t *target=NULL;for(uint16_t i=0;i<builder->model->object_count;i++){vk_screen_object_t*object=&builder->model->objects[i];if(strcmp(object->widget_id,widget->id)==0&&strcmp(object->id,widget->target)==0){matches++;target=object;}}

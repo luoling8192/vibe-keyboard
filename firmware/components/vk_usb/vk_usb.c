@@ -9,13 +9,13 @@
 #ifdef VK_USB_PRODUCTION_NATIVE_TEST
 #include "vk_usb_native_platform.h"
 #else
-#include "driver/usb_serial_jtag.h"
 #include "esp_app_desc.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "vk_usb_tinyusb.h"
 #endif
 
 #define VK_USB_TASK_STACK_BYTES 32768U
@@ -44,10 +44,12 @@ static vk_usb_input_handler_registration_t s_input_registration;
 static vk_usb_input_lifecycle_registration_t s_input_lifecycle_registration;
 static vk_usb_led_lifecycle_registration_t s_led_lifecycle_registration;
 static vk_usb_capability_provider_registration_t s_capability_registration;
+static vk_usb_audio_diagnostics_provider_registration_t s_audio_diagnostics_registration;
 static vk_usb_asset_handler_registration_t s_asset_registration;
 static vk_usb_screen_handler_registration_t s_screen_registration;
 static vk_usb_widget_handler_registration_t s_widget_registration;
 static vk_usb_led_handler_registration_t s_led_registration;
+static vk_usb_uac_source_registration_t s_uac_source_registration;
 #ifdef VK_USB_PRODUCTION_NATIVE_TEST
 static vk_usb_stop_requested_hook_t s_stop_requested_hook;
 static void *s_stop_requested_hook_context;
@@ -58,12 +60,37 @@ static void *s_poll_returned_hook_context;
 static esp_err_t production_install(void *context)
 {
     (void)context;
+#ifdef VK_USB_PRODUCTION_NATIVE_TEST
     usb_serial_jtag_driver_config_t config = {.tx_buffer_size = VK_USB_DRIVER_BUFFER_BYTES, .rx_buffer_size = VK_USB_DRIVER_BUFFER_BYTES};
     return usb_serial_jtag_driver_install(&config);
+#else
+    return vk_usb_tinyusb_connect(&s_uac_source_registration);
+#endif
 }
-static esp_err_t production_uninstall(void *context) { (void)context; return usb_serial_jtag_driver_uninstall(); }
-static int production_read(void *context, uint8_t *bytes, size_t capacity, uint32_t timeout_ms) { (void)context; return usb_serial_jtag_read_bytes(bytes, (uint32_t)capacity, pdMS_TO_TICKS(timeout_ms)); }
-static int production_write(void *context, const uint8_t *bytes, size_t length, uint32_t timeout_ms) { (void)context; return usb_serial_jtag_write_bytes(bytes, length, pdMS_TO_TICKS(timeout_ms)); }
+static esp_err_t production_uninstall(void *context) {
+    (void)context;
+#ifdef VK_USB_PRODUCTION_NATIVE_TEST
+    return usb_serial_jtag_driver_uninstall();
+#else
+    return vk_usb_tinyusb_disconnect();
+#endif
+}
+static int production_read(void *context, uint8_t *bytes, size_t capacity, uint32_t timeout_ms) {
+    (void)context;
+#ifdef VK_USB_PRODUCTION_NATIVE_TEST
+    return usb_serial_jtag_read_bytes(bytes, (uint32_t)capacity, pdMS_TO_TICKS(timeout_ms));
+#else
+    return vk_usb_tinyusb_read(bytes, capacity, timeout_ms);
+#endif
+}
+static int production_write(void *context, const uint8_t *bytes, size_t length, uint32_t timeout_ms) {
+    (void)context;
+#ifdef VK_USB_PRODUCTION_NATIVE_TEST
+    return usb_serial_jtag_write_bytes(bytes, length, pdMS_TO_TICKS(timeout_ms));
+#else
+    return vk_usb_tinyusb_write(bytes, length, timeout_ms);
+#endif
+}
 static uint64_t production_now_ms(void *context) { (void)context; return (uint64_t)(esp_timer_get_time() / 1000); }
 static void production_state_lock(void *context) { xSemaphoreTake(((production_context_t *)context)->state_mutex, portMAX_DELAY); }
 static void production_state_unlock(void *context) { xSemaphoreGive(((production_context_t *)context)->state_mutex); }
@@ -153,6 +180,10 @@ static esp_err_t prepare_context(void *argument)
     }
     if (error == ESP_OK && s_capability_registration.get_snapshot != NULL) {
         error = vk_usb_service_register_capability_provider(context->service, &s_capability_registration);
+    }
+    if (error == ESP_OK && s_audio_diagnostics_registration.get_snapshot != NULL) {
+        error = vk_usb_service_register_audio_diagnostics_provider(
+            context->service, &s_audio_diagnostics_registration);
     }
     if (error == ESP_OK && s_asset_registration.handle_command != NULL) {
         error = vk_usb_service_register_asset_handler(context->service, &s_asset_registration);
@@ -318,6 +349,13 @@ esp_err_t vk_usb_register_capability_provider(const vk_usb_capability_provider_r
     s_capability_registration = *registration;
     return ESP_OK;
 }
+esp_err_t vk_usb_register_audio_diagnostics_provider(const vk_usb_audio_diagnostics_provider_registration_t *registration)
+{
+    if (registration == NULL || registration->get_snapshot == NULL) return ESP_ERR_INVALID_ARG;
+    if (s_runtime_initialized || s_audio_diagnostics_registration.get_snapshot != NULL) return ESP_ERR_INVALID_STATE;
+    s_audio_diagnostics_registration = *registration;
+    return ESP_OK;
+}
 esp_err_t vk_usb_register_asset_handler(const vk_usb_asset_handler_registration_t *registration)
 {
     if (registration == NULL || registration->handle_command == NULL || registration->handle_chunk == NULL ||
@@ -345,6 +383,14 @@ esp_err_t vk_usb_register_led_handler(const vk_usb_led_handler_registration_t *r
     if (registration == NULL || registration->handle_command == NULL) return ESP_ERR_INVALID_ARG;
     if (s_runtime_initialized || s_led_registration.handle_command != NULL) return ESP_ERR_INVALID_STATE;
     s_led_registration = *registration;
+    return ESP_OK;
+}
+esp_err_t vk_usb_register_uac_source(const vk_usb_uac_source_registration_t *registration)
+{
+    if (registration == NULL || registration->start == NULL ||
+        registration->read == NULL || registration->stop == NULL) return ESP_ERR_INVALID_ARG;
+    if (s_runtime_initialized || s_uac_source_registration.start != NULL) return ESP_ERR_INVALID_STATE;
+    s_uac_source_registration = *registration;
     return ESP_OK;
 }
 

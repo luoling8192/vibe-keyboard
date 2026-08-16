@@ -35,9 +35,11 @@ required = {
     "opus_encoder_ctl",
     "opus_encode",
     "opus_encoder_destroy",
-    "usb_serial_jtag_driver_install",
-    "usb_serial_jtag_read_bytes",
-    "usb_serial_jtag_write_bytes",
+    "tusb_rhport_init",
+    "uac_device_init",
+    "tud_audio_n_write",
+    "tud_cdc_n_read",
+    "tud_cdc_n_write",
 }
 missing = sorted(required - names)
 if missing:
@@ -50,13 +52,12 @@ forbidden = {
     "httpd_start",
     "esp_http_client_init",
     "socket",
-    "tinyusb_driver_install",
-    "tusb_init",
-    "tud_audio_n_write",
-    "tud_audio_write",
+    "usb_serial_jtag_driver_install",
+    "usb_serial_jtag_read_bytes",
+    "usb_serial_jtag_write_bytes",
 }
 linked = sorted(forbidden & names)
 if linked:
-    raise SystemExit(f"forbidden BLE/network/TinyUSB/UAC entry points linked: {linked}")
+    raise SystemExit(f"forbidden BLE/network/legacy-USB entry points linked: {linked}")
 
-print("production audio ELF verified: I2S/AFE/Opus/USB Serial-JTAG linked; BLE/network/TinyUSB/UAC entry points absent")
+print("production audio ELF verified: I2S/AFE/Opus and composite CDC/UAC linked; BLE/network/legacy USB Serial-JTAG entry points absent")

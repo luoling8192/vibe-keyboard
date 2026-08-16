@@ -116,10 +116,13 @@ public enum HostAction: Equatable, Sendable {
     case interruptControlC
     case wakeApplication
     case pasteText(String)
+    case holdKey(String)
     case customShortcut(KeyboardShortcut)
     case customCommand(CommandSpecification)
     case launchApplication(bundleIdentifier: String)
     case screenMode(ScreenMode)
+    case dashboardNextPage
+    case dashboardNextStocks
     case petInteraction(String)
 }
 
@@ -127,6 +130,7 @@ extension HostAction: Codable {
     private enum CodingKeys: String, CodingKey {
         case type
         case text
+        case key
         case shortcut
         case command
         case bundleIdentifier = "bundle_identifier"
@@ -142,10 +146,13 @@ extension HostAction: Codable {
         case interruptControlC = "interrupt_ctrl_c"
         case wakeApplication = "wake_application"
         case pasteText = "paste_text"
+        case holdKey = "hold_key"
         case customShortcut = "custom_shortcut"
         case customCommand = "custom_command"
         case launchApplication = "launch_application"
         case screenMode = "screen_mode"
+        case dashboardNextPage = "dashboard_next_page"
+        case dashboardNextStocks = "dashboard_next_stocks"
         case petInteraction = "pet_interaction"
     }
 
@@ -161,6 +168,8 @@ extension HostAction: Codable {
         case .wakeApplication: self = .wakeApplication
         case .pasteText:
             self = .pasteText(try Self.requireNonempty(container.decode(String.self, forKey: .text), action: kind.rawValue))
+        case .holdKey:
+            self = .holdKey(try Self.requireKey(container.decode(String.self, forKey: .key), action: kind.rawValue))
         case .customShortcut:
             self = .customShortcut(try container.decode(KeyboardShortcut.self, forKey: .shortcut))
         case .customCommand:
@@ -169,6 +178,10 @@ extension HostAction: Codable {
             self = .launchApplication(bundleIdentifier: try Self.requireNonempty(container.decode(String.self, forKey: .bundleIdentifier), action: kind.rawValue))
         case .screenMode:
             self = .screenMode(try container.decode(ScreenMode.self, forKey: .mode))
+        case .dashboardNextPage:
+            self = .dashboardNextPage
+        case .dashboardNextStocks:
+            self = .dashboardNextStocks
         case .petInteraction:
             self = .petInteraction(try Self.requireNonempty(container.decode(String.self, forKey: .interaction), action: kind.rawValue))
         }
@@ -186,6 +199,9 @@ extension HostAction: Codable {
         case let .pasteText(text):
             try container.encode(Kind.pasteText, forKey: .type)
             try container.encode(Self.requireNonempty(text, action: Kind.pasteText.rawValue), forKey: .text)
+        case let .holdKey(key):
+            try container.encode(Kind.holdKey, forKey: .type)
+            try container.encode(Self.requireKey(key, action: Kind.holdKey.rawValue), forKey: .key)
         case let .customShortcut(shortcut):
             try container.encode(Kind.customShortcut, forKey: .type)
             try container.encode(shortcut, forKey: .shortcut)
@@ -198,6 +214,10 @@ extension HostAction: Codable {
         case let .screenMode(mode):
             try container.encode(Kind.screenMode, forKey: .type)
             try container.encode(mode, forKey: .mode)
+        case .dashboardNextPage:
+            try container.encode(Kind.dashboardNextPage, forKey: .type)
+        case .dashboardNextStocks:
+            try container.encode(Kind.dashboardNextStocks, forKey: .type)
         case let .petInteraction(interaction):
             try container.encode(Kind.petInteraction, forKey: .type)
             try container.encode(Self.requireNonempty(interaction, action: Kind.petInteraction.rawValue), forKey: .interaction)
@@ -208,6 +228,8 @@ extension HostAction: Codable {
         switch self {
         case let .pasteText(text):
             _ = try Self.requireNonempty(text, action: Kind.pasteText.rawValue)
+        case let .holdKey(key):
+            _ = try Self.requireKey(key, action: Kind.holdKey.rawValue)
         case let .launchApplication(bundleIdentifier):
             _ = try Self.requireNonempty(bundleIdentifier, action: Kind.launchApplication.rawValue)
         case let .petInteraction(interaction):
@@ -223,6 +245,17 @@ extension HostAction: Codable {
             throw InputConfigurationError.missingAssociatedValue(action: action)
         }
         return value
+    }
+
+    private static func requireKey(_ value: String, action: String) throws -> String {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else {
+            throw InputConfigurationError.missingAssociatedValue(action: action)
+        }
+        guard !normalized.contains(where: \.isWhitespace) else {
+            throw InputConfigurationError.invalidShortcutKey(value)
+        }
+        return normalized
     }
 }
 

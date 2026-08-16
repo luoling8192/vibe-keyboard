@@ -62,10 +62,10 @@ static esp_err_t show_acceptance_screen(void)
         lvgl_port_unlock();
         return ESP_ERR_NO_MEM;
     }
-    lv_label_set_text(title, "VIBE KEYBOARD");
+    lv_label_set_text(title, "VIBEBOARD");
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_pos(title, 34, 42);
-    lv_label_set_text(status, "CUSTOM FIRMWARE  /  USB READY");
+    lv_label_set_text(status, "USB MICROPHONE  /  READY");
     lv_obj_set_style_text_color(status, lv_color_hex(0x8EA6B8), 0);
     lv_obj_set_pos(status, 34, 76);
     lv_obj_invalidate(screen);

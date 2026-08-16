@@ -26,6 +26,7 @@ struct StockQuote: Equatable, Sendable {
 }
 
 enum DashboardModule: String, CaseIterable, Identifiable, Sendable {
+    case pet
     case codex
     case claude
     case system
@@ -37,6 +38,7 @@ enum DashboardModule: String, CaseIterable, Identifiable, Sendable {
 
     var label: String {
         switch self {
+        case .pet: "Pet"
         case .codex: "Codex"
         case .claude: "Claude"
         case .system: "CPU & memory"
@@ -45,12 +47,23 @@ enum DashboardModule: String, CaseIterable, Identifiable, Sendable {
         case .empty: "Empty"
         }
     }
+
 }
 
 struct DashboardTileContent: Equatable, Sendable {
+    let module: DashboardModule
     let title: String
-    let line1: String
-    let line2: String
+    let lines: [String]
+
+    var screenText: String {
+        if module == .pet {
+            return "PET"
+        }
+        if module == .system {
+            return "     CPU        MEMORY"
+        }
+        return ([title] + lines.prefix(4)).joined(separator: "\n")
+    }
 }
 
 struct DashboardPageContent: Equatable, Sendable {
@@ -106,81 +119,103 @@ struct LiveDashboardSnapshot: Equatable, Sendable {
         stockOffset: Int
     ) -> DashboardPageContent {
         let normalized = Self.normalizedModules(modules)
-        let index = pageIndex & 1
+        let pageCount = normalized.count / 2
+        let index = ((pageIndex % pageCount) + pageCount) % pageCount
         let firstSlot = index * 2
         return DashboardPageContent(
             index: index,
             left: tile(
                 module: normalized[firstSlot],
-                slot: firstSlot,
                 stockOffset: stockOffset
             ),
             right: tile(
                 module: normalized[firstSlot + 1],
-                slot: firstSlot + 1,
                 stockOffset: stockOffset
             )
         )
     }
 
     static func normalizedModules(_ modules: [DashboardModule]) -> [DashboardModule] {
-        let defaults: [DashboardModule] = [.codex, .claude, .system, .stocks]
-        return Array((modules + defaults).prefix(4))
+        var normalized = modules
+        if normalized.isEmpty {
+            normalized = [.codex, .claude]
+        }
+        if normalized.count.isMultiple(of: 2) == false {
+            normalized.append(.empty)
+        }
+        return normalized
     }
 
     private func tile(
         module: DashboardModule,
-        slot: Int,
         stockOffset: Int
     ) -> DashboardTileContent {
-        let page = slot < 2 ? "A" : "B"
-        let position = slot % 2 + 1
-        let prefix = "\(page)\(position)"
         switch module {
+        case .pet:
+            return .init(
+                module: module,
+                title: "PET",
+                lines: []
+            )
         case .codex:
             return .init(
-                title: "\(prefix) CODEX",
-                line1: usageLine(codex),
-                line2: "TODAY \(Self.count(codex.tokensToday))"
+                module: module,
+                title: "CODEX",
+                lines: [
+                    usageLine(codex),
+                    "STATE \(codex.status.uppercased())",
+                ]
             )
         case .claude:
             return .init(
-                title: "\(prefix) CLAUDE",
-                line1: usageLine(claude),
-                line2: "TODAY \(Self.count(claude.tokensToday))"
+                module: module,
+                title: "CLAUDE",
+                lines: [
+                    usageLine(claude),
+                    "STATE \(claude.status.uppercased())",
+                ]
             )
         case .system:
             return .init(
-                title: "\(prefix) SYSTEM",
-                line1: "CPU \(cpuPercent)%",
-                line2: "MEM \(memoryPercent)%"
+                module: module,
+                title: "SYSTEM",
+                lines: [
+                    "CPU \(cpuPercent)%",
+                    "MEMORY \(memoryPercent)%",
+                ]
             )
         case .network:
             return .init(
-                title: "\(prefix) NETWORK",
-                line1: "DOWN \(Self.speed(downloadBytesPerSecond))",
-                line2: "UP \(Self.speed(uploadBytesPerSecond))"
+                module: module,
+                title: "NETWORK",
+                lines: [
+                    "DOWN \(Self.speed(downloadBytesPerSecond))",
+                    "UP \(Self.speed(uploadBytesPerSecond))",
+                    "LINK ACTIVE",
+                ]
             )
         case .stocks:
             guard !stocks.isEmpty else {
                 return .init(
-                    title: "\(prefix) STOCKS",
-                    line1: "NO QUOTES",
-                    line2: "CHECK SYMBOLS"
+                    module: module,
+                    title: "STOCKS",
+                    lines: ["NO QUOTES", "CHECK SYMBOLS"]
                 )
             }
             let start = stockOffset % stocks.count
-            let second = (start + 1) % stocks.count
-            let range = stocks.count == 1
-                ? "\(start + 1)/1"
-                : "\(start + 1)-\(second + 1)/\(stocks.count)"
             return .init(
-                title: "\(prefix) STOCKS \(range)",
-                line1: stocks[start].displayLine,
-                line2: stocks.count == 1 ? "NEXT UPDATE" : stocks[second].displayLine
+                module: module,
+                title: "STOCKS",
+                lines: (0..<min(4, stocks.count)).map {
+                    stocks[(start + $0) % stocks.count].displayLine
+                }
             )
         case .empty:
-            return .init(title: "\(prefix) EMPTY", line1: "--", line2: "--")
+            return .init(
+                module: module,
+                title: "EMPTY",
+                lines: []
+            )
         }
     }
 

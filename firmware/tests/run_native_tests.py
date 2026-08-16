@@ -289,6 +289,13 @@ with tempfile.TemporaryDirectory(prefix="vk-native-") as directory:
     subprocess.run(input_production_command, check=True)
     subprocess.run([str(input_production_binary)], check=True)
 
+    standard_microphone_input_binary = pathlib.Path(directory) / "test_input_standard_microphone"
+    standard_microphone_input_command = input_production_command.copy()
+    standard_microphone_input_command.insert(5, "-DVK_INPUT_STANDARD_MICROPHONE_TEST=1")
+    standard_microphone_input_command[-1] = str(standard_microphone_input_binary)
+    subprocess.run(standard_microphone_input_command, check=True)
+    subprocess.run([str(standard_microphone_input_binary)], check=True)
+
     usb_input_binary = pathlib.Path(directory) / "test_usb_input_integration"
     usb_input_command = [
         "cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
@@ -416,6 +423,7 @@ with tempfile.TemporaryDirectory(prefix="vk-native-") as directory:
     subprocess.run([str(audio_production_binary), "stop-timeout"], check=True)
     subprocess.run([str(audio_production_binary), "runtime-failure"], check=True)
     subprocess.run([str(audio_production_binary), "abort-no-eos"], check=True)
+    subprocess.run([str(audio_production_binary), "system-mic"], check=True)
     subprocess.run([str(audio_production_binary), "cleanup-disable"], check=True)
     subprocess.run([str(audio_production_binary), "cleanup-destroy"], check=True)
     subprocess.run([str(audio_production_binary), "cleanup-persistent"], check=True)

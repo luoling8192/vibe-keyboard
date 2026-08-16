@@ -14,8 +14,8 @@ ESP32-S3 revision-compatible target
 8 MiB octal PSRAM
 NV3007 428×142 RGB565 display
 four keys on verified GPIOs
-I2S0 PDM microphone bus on GPIO41/40, 16 kHz/two input slots before mono AFE output
-USB Serial/JTAG CDC host transport
+I2S0 PDM microphone bus on GPIO41/40, 16 kHz/two input slots
+  USB OTG composite transport: CDC control plus UAC2 microphone
 ```
 
 It does not initialize Bluetooth, Wi-Fi, GATT, advertising, or network services. macOS owns user configuration, source asset conversion, host actions, widget sampling, saved recordings, and credentials.
@@ -25,10 +25,10 @@ It does not initialize Bluetooth, Wi-Fi, GATT, advertising, or network services.
 ```text
 main
   ├─ vk_board       exact pins, panel, keys, microphone, storage mounts
-  ├─ vk_usb         framed USB RX/TX and connection lifecycle
+  ├─ vk_usb         TinyUSB composite descriptors, CDC protocol, and UAC source lifecycle
   ├─ vk_state       typed device/configured/effective state
   ├─ vk_input       key scan, debounce, events, voice interaction
-  ├─ vk_audio       PDM → AFE → Opus → framed USB
+  ├─ vk_audio       PDM → direct UAC PCM or AFE → legacy Opus → framed CDC
   ├─ vk_led         calibrated feedback arbitration and fail-dark owner
   ├─ vk_assets      SPIFFS transfers, VKA1 validation, immutable revisions/recovery
   ├─ vk_screen      LVGL objects, modes, widgets, pet animation
@@ -49,7 +49,7 @@ validate hardware/build identity and, only when the installed bootloader capabil
   → show local boot/USB-wait state
   → initialize pinned PDM/AFE/Opus control in idle/non-capturing state
   → prepare keys and register typed USB input/config/lifecycle handlers while scanning remains stopped
-  → start framed USB Serial/JTAG service with all consoles/logs disabled from CDC
+  → start TinyUSB CDC + UAC2 composite service with all consoles/logs disabled from CDC
   → start key scanner and input/audio-control owners
   → recover bounded temporary transfers without activating them
   → render configured mode
@@ -73,7 +73,11 @@ Cross-component mutation uses typed commands/results with bounded mailboxes. The
 
 ## USB and Logs
 
-The only device transport is the ESP32-S3 built-in USB Serial/JTAG CDC driver. TinyUSB, USB OTG CDC, USB Audio Class, Bluetooth, Wi-Fi, and network fallback are excluded.
+The only device transport is the ESP32-S3 internal USB PHY in USB OTG device
+mode. TinyUSB exposes CDC for the framed product protocol and a microphone-only
+UAC2 function. Bluetooth, Wi-Fi, USB host mode, and network fallback are
+excluded. ROM download recovery continues to use the chip's USB Serial/JTAG
+path; application startup does not burn eFuses or replace the bootloader.
 
 The USB CDC byte stream is a binary protocol after startup. Primary/secondary console, bootloader/application logs, VFS console, and panic text are disabled in production; development logs use JTAG or a separately reviewed build. One service task owns install/uninstall and one serialized TX boundary. A `transport/usb` command starts an epoch; two-second pings maintain a five-second lease. Lease expiry clears only temporary session state.
 
@@ -89,7 +93,14 @@ One RGB565 full-screen buffer is 121,552 bytes. Buffer count and chunk lines mus
 
 Key GPIO identity follows [Hardware Contract](../product/hardware.md). `vk_input` is the only debounce owner and emits canonical `k1...k4` events.
 
-The microphone pipeline reproduces the verified vendor capture and encoder contract from [Input and Audio Contract](../product/input-audio.md): ESP-IDF 5.5.2 named I2S0 PDM RX APIs at 16 kHz with two 16-bit slots, a pinned ESP-SR AFE release using named `MM` fields, processed mono PCM, and a pinned ESP32-target Opus component. It emits sequence zero with first flag, monotonic 60 ms packets, and one empty final frame with the next sequence and final flag. Sequence advances only after typed ownership transfer to the bounded current-epoch USB queue; no physical-write acknowledgement API or raw service pointer crosses the component boundary. Audio initializes idle. Only the input audio-control owner may prepare a paused session, hand off the authoritative voice-key event, release capture, and later stop/abort it. The 5 ms scanner never calls synchronous audio or USB APIs.
+The microphone pipeline reproduces the verified vendor capture and encoder
+contract from [Input and Audio Contract](../product/input-audio.md): ESP-IDF
+5.5.2 named I2S0 PDM RX APIs at 16 kHz with two 16-bit slots. UAC bypasses the
+speech AFE, selects the input slot with greater block energy, and publishes it
+as 16-bit mono PCM. Legacy voice sessions retain the pinned ESP-SR AFE using
+named `MM` fields, the pinned Opus encoder, and the existing framed CDC
+protocol. UAC and legacy Opus sessions arbitrate the single I2S owner and never
+run concurrently. Other CDC features remain available while UAC streams.
 
 Production AFE/Opus adapters remain gated until exact versions, hashes, ESP-IDF compatibility, named AFE ABI, and target linkage are recorded. A host Homebrew arm64 Opus library may test pure logic but can never satisfy the ESP32 dependency. Raw `afe_config_t` offsets are forbidden. Version 1 applies unity post-AFE gain and does not claim vendor gain parity; no host `voice_gain` command is exposed.
 
