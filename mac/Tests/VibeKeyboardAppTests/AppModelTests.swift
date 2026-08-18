@@ -134,6 +134,30 @@ struct AppModelTests {
         #expect(!model.canSendScreen)
     }
 
+    @Test func activeTransportFailureRetriesAfterHubReenumerates() async throws {
+        let descriptor = testDescriptor()
+        let monitor = TestMonitor()
+        let initial = TestSession(descriptor: descriptor)
+        let replacement = TestSession(descriptor: descriptor)
+        let model = AppModel(
+            monitor: monitor,
+            sessionFactory: SequencedSessionFactory(sessions: [initial, replacement]),
+            mappingRepository: KeyMappingRepository(store: MemoryConfigurationStore())
+        )
+        model.start()
+        monitor.send(.attached(descriptor))
+        await eventually { model.isConnected }
+        #expect(await initial.inputConfigurationCount() == 1)
+
+        initial.send(.stateChanged(.failed(.readFailed(ENXIO))))
+
+        await eventually(timeout: .seconds(2)) {
+            let configurations = await replacement.inputConfigurationCount()
+            return model.isConnected && configurations == 1
+        }
+        #expect(model.connection.title == "Connected")
+    }
+
     @Test func canonicalEventsReachActionPipelineExactlyOnceAndReset() async throws {
         let descriptor = testDescriptor()
         let monitor = TestMonitor()
@@ -444,6 +468,16 @@ struct AppModelTests {
         ))
     }
 
+    @Test func codexUsageReaderAddsNodeDirectoriesToTheLaunchedProcessPath() {
+        let environment = CodexUsageReader.executionEnvironment(
+            for: URL(fileURLWithPath: "/opt/homebrew/bin/codex"),
+            base: ["PATH": "/usr/bin:/bin", "HOME": "/Users/tester"]
+        )
+
+        #expect(environment["PATH"] == "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+        #expect(environment["HOME"] == "/Users/tester")
+    }
+
     @Test func dashboardPagesAreDynamicAndSelectorsStayIndependent() {
         let model = AppModel(
             monitor: TestMonitor(),
@@ -579,6 +613,24 @@ private enum TestSessionError: Error {
 private struct TestSessionFactory: AppDeviceSessionFactory {
     let session: TestSession
     func makeSession(for descriptor: USBDeviceDescriptor) throws -> any AppDeviceSession { session }
+}
+
+private final class SequencedSessionFactory: AppDeviceSessionFactory, @unchecked Sendable {
+    private let lock = NSLock()
+    private let sessions: [TestSession]
+    private var nextIndex = 0
+
+    init(sessions: [TestSession]) {
+        self.sessions = sessions
+    }
+
+    func makeSession(for descriptor: USBDeviceDescriptor) throws -> any AppDeviceSession {
+        lock.withLock {
+            let index = min(nextIndex, sessions.count - 1)
+            nextIndex += 1
+            return sessions[index]
+        }
+    }
 }
 
 private actor ActionPipelineSpy: AppActionRouting {

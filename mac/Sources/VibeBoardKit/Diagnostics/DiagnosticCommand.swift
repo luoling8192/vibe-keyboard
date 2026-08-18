@@ -5,6 +5,7 @@ public enum DiagnosticCLICommand: Equatable, Sendable {
     case list
     case inspect(durationSeconds: Int)
     case handshake(timeoutSeconds: Int)
+    case inputConfiguration
     case keys(durationSeconds: Int)
     case screen
     case image(inputURL: URL)
@@ -28,6 +29,7 @@ public enum DiagnosticCLIParser {
       VibeBoardDiagnostic list
       VibeBoardDiagnostic inspect [--duration 1...60]
       VibeBoardDiagnostic handshake --allow-safe-commands [--timeout 1...60]
+      VibeBoardDiagnostic input --allow-safe-commands
       VibeBoardDiagnostic keys --allow-safe-commands [--duration 1...60]
       VibeBoardDiagnostic screen --allow-safe-commands
       VibeBoardDiagnostic image --allow-safe-commands --input /absolute/image.jpg
@@ -52,6 +54,10 @@ public enum DiagnosticCLIParser {
             try requireSafeFlag(options)
             try rejectOptions(options, allowed: ["--allow-safe-commands", "--timeout"])
             return .handshake(timeoutSeconds: try boundedInteger(options, name: "--timeout", defaultValue: 20))
+        case "input":
+            try requireSafeFlag(options)
+            try rejectOptions(options, allowed: ["--allow-safe-commands"])
+            return .inputConfiguration
         case "keys":
             try requireSafeFlag(options)
             try rejectOptions(options, allowed: ["--allow-safe-commands", "--duration"])

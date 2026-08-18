@@ -3,9 +3,10 @@ import SwiftUI
 @main
 struct VibeKeyboardApplication: App {
     @StateObject private var model = AppModel()
+    @NSApplicationDelegateAdaptor(VibeKeyboardAppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup("Vibe Keyboard") {
+        WindowGroup(id: "main") {
             RootView(model: model)
         }
         .defaultSize(width: 1040, height: 700)
@@ -18,6 +19,11 @@ struct VibeKeyboardApplication: App {
                 .disabled(!model.canUploadAssets)
             }
         }
+
+        MenuBarExtra("Vibe Keyboard", systemImage: "keyboard") {
+            VibeKeyboardMenu(model: model)
+        }
+
         Settings {
             Form {
                 Text("USB Serial/JTAG is the only device transport.")

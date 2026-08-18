@@ -22,6 +22,18 @@ open "dist/Vibe Keyboard.app"
 The distributable archive is `dist/VibeKeyboard-macOS-arm64.zip`. Only one
 Vibe Keyboard or diagnostic process may own the USB serial device at a time.
 
+## Background Operation
+
+Vibe Keyboard is a menu-bar application. Closing its main window only hides
+the configuration UI; USB monitoring, key mappings, audio routing, and live
+dashboard updates keep running until you choose `Quit Vibe Keyboard` from the
+menu-bar icon.
+
+Drag the app to `/Applications` before using the `Launch at login` toggle in
+that same menu. It registers the installed app with macOS and starts it after
+you sign in; it is a user-space login item, not a kernel driver or system-wide
+daemon.
+
 ## First Run
 
 1. Open `Keys` and grant Accessibility access before testing paste, Control,

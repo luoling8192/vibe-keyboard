@@ -16,9 +16,13 @@ struct ConnectedDiagnosticTests {
             _ = try DiagnosticCLIParser.parse(["screen"])
         }
         #expect(throws: DiagnosticCLIError.safeFlagRequired) {
+            _ = try DiagnosticCLIParser.parse(["input"])
+        }
+        #expect(throws: DiagnosticCLIError.safeFlagRequired) {
             _ = try DiagnosticCLIParser.parse(["image", "--input", "/tmp/test.jpg"])
         }
         #expect(try DiagnosticCLIParser.parse(["screen", "--allow-safe-commands"]) == .screen)
+        #expect(try DiagnosticCLIParser.parse(["input", "--allow-safe-commands"]) == .inputConfiguration)
         #expect(throws: DiagnosticCLIError.unsupportedOption("--raw-json")) {
             _ = try DiagnosticCLIParser.parse(["handshake", "--allow-safe-commands", "--raw-json", "{}"])
         }

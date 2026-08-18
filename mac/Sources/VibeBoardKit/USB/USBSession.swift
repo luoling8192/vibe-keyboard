@@ -1167,6 +1167,11 @@ public actor USBSession {
 
     private func handleEventConsumerTermination() {
         guard !eventsFinished else { return }
+        if case .disconnected = state {
+            eventsFinished = true
+            continuation.finish()
+            return
+        }
         clearReplacementState()
         eventsFinished = true
         heartbeatTask?.cancel()

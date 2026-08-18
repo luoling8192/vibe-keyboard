@@ -676,6 +676,20 @@ struct USBSessionTests {
         #expect(operations.closeCount == 1)
     }
 
+    @Test func explicitDisconnectThenConsumerCancellationPreservesDisconnectedState() async throws {
+        let operations = FakeSerialOperations()
+        let session = try USBSession(descriptor: descriptor, operations: operations)
+        let consumer = Task {
+            for await _ in session.events {}
+        }
+        try await session.openForInspection()
+        await session.disconnect()
+        consumer.cancel()
+        await consumer.value
+        #expect(await session.currentState() == .disconnected)
+        #expect(operations.closeCount == 1)
+    }
+
     @Test func readyConsumerCancellationStopsHeartbeatAndClosesOnce() async throws {
         let operations = FakeSerialOperations(reads: [.value(deviceInfoFrame())])
         let session = try USBSession(

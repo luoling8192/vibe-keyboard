@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Combine
+import Darwin
 import Foundation
 import VibeBoardKit
 
@@ -256,6 +257,7 @@ struct KeyDeliveryStatus: Equatable {
 
 @MainActor
 final class AppModel: ObservableObject {
+    private static let reconnectRetryLimit = 15
     @Published var selectedPage: AppPage = .device
     @Published private(set) var connection: AppConnectionState = .disconnected
     @Published private(set) var replacementContext: ReplacementSessionContext?
@@ -316,6 +318,8 @@ final class AppModel: ObservableObject {
     private let petCatalog: any PetCatalogProviding
     private var monitorTask: Task<Void, Never>?
     private var sessionTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttempts = 0
     private var operationTask: Task<Void, Never>?
     private var dashboardTask: Task<Void, Never>?
     private var petCatalogTask: Task<Void, Never>?
@@ -409,6 +413,7 @@ final class AppModel: ObservableObject {
     deinit {
         monitorTask?.cancel()
         sessionTask?.cancel()
+        reconnectTask?.cancel()
         operationTask?.cancel()
         dashboardTask?.cancel()
         modifierTask?.cancel()
@@ -457,11 +462,17 @@ final class AppModel: ObservableObject {
 
     func disconnect() {
         let old = session
+        let oldSessionTask = sessionTask
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempts = 0
         clearSessionPresentation()
-        sessionTask?.cancel()
         sessionTask = nil
         session = nil
-        Task { await old?.disconnect() }
+        Task {
+            await old?.disconnect()
+            oldSessionTask?.cancel()
+        }
     }
 
     func importAndUpload(url: URL, pet: Bool = false) {
@@ -1376,7 +1387,11 @@ final class AppModel: ObservableObject {
     private func consumeMonitor(_ event: USBDeviceMonitorEvent) async {
         switch event {
         case .attached(let descriptor):
-            guard session == nil else { return }
+            if let session,
+               session.descriptor.registryEntryID == descriptor.registryEntryID,
+               isConnected {
+                return
+            }
             await attach(descriptor)
         case .detached(let registryEntryID):
             guard session?.descriptor.registryEntryID == registryEntryID else { return }
@@ -1388,9 +1403,12 @@ final class AppModel: ObservableObject {
     }
 
     private func attach(_ descriptor: USBDeviceDescriptor) async {
+        reconnectTask?.cancel()
+        reconnectTask = nil
         operationTask?.cancel()
-        sessionTask?.cancel()
+        let oldSessionTask = sessionTask
         if let existing = session { await existing.disconnect() }
+        oldSessionTask?.cancel()
         clearSessionPresentation()
         do {
             let next = try sessionFactory.makeSession(for: descriptor)
@@ -1407,12 +1425,51 @@ final class AppModel: ObservableObject {
                 mode: interactionMode,
                 voiceKey: Self.deviceVoiceKey(for: keyProfile)
             )
+            reconnectAttempts = 0
         } catch {
-            connection = .failed(String(describing: error))
-            diagnosticMessage = "Connection failed: \(error)"
+            let failure = String(describing: error)
+            if case .failed = connection {
+                // Keep the terminal USB reason emitted by the session; a following
+                // command can otherwise only report that its descriptor is gone.
+            } else {
+                connection = .failed(failure)
+                diagnosticMessage = "Connection failed: \(failure)"
+            }
             replacementContext = nil
             updateCapabilities()
+            scheduleReconnect(after: error, for: descriptor)
         }
+    }
+
+    private func scheduleReconnect(after error: Error, for descriptor: USBDeviceDescriptor) {
+        guard isRetryableTransportError(error), reconnectTask == nil,
+              reconnectAttempts < Self.reconnectRetryLimit else { return }
+        reconnectAttempts += 1
+        let attempt = reconnectAttempts
+        connection = .connecting("Retrying USB connection (\(attempt)/\(Self.reconnectRetryLimit))")
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, let self else { return }
+            self.reconnectTask = nil
+            await self.attach(descriptor)
+        }
+    }
+
+    private func isRetryableTransportError(_ error: Error) -> Bool {
+        guard let usbError = error as? USBSessionError else { return false }
+        return switch usbError {
+        case .disconnected, .endOfFile, .readFailed, .waitFailed, .writeFailed, .writeTimedOut:
+            true
+        case .openFailed(let code), .configureFailed(let code):
+            Self.isTransientDeviceLoss(code)
+        case .alreadyOpen, .handshakeTimedOut, .cancelled,
+             .eventBufferOverflow, .eventConsumerTerminated, .protocolFailure, .incompatibleHardware:
+            false
+        }
+    }
+
+    private static func isTransientDeviceLoss(_ code: Int32) -> Bool {
+        code == ENXIO || code == ENOENT || code == EIO
     }
 
     private static func deviceVoiceKey(for profile: KeyMappingProfile) -> VoiceKey {
@@ -1463,6 +1520,9 @@ final class AppModel: ObservableObject {
                 let failure = String(describing: error)
                 diagnosticMessage = "USB session failed: \(failure)"
                 connection = .failed(failure)
+                if let session {
+                    scheduleReconnect(after: error, for: session.descriptor)
+                }
                 if let session {
                     Task { [weak self] in
                         let diagnostics = await session.diagnostics()

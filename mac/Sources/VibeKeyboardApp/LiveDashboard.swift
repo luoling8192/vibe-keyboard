@@ -477,7 +477,7 @@ private enum ClaudeUsageReader {
     }
 }
 
-private enum CodexUsageReader {
+enum CodexUsageReader {
     private enum ReaderError: Error {
         case executableNotFound
         case invalidResponse
@@ -520,6 +520,7 @@ private enum CodexUsageReader {
         let output = Pipe()
         process.executableURL = executable
         process.arguments = ["app-server", "--stdio"]
+        process.environment = executionEnvironment(for: executable)
         process.standardInput = input
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -630,6 +631,29 @@ private enum CodexUsageReader {
             return nil
         }
         return URL(fileURLWithPath: path)
+    }
+
+    static func executionEnvironment(
+        for executable: URL,
+        base: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: String] {
+        var environment = base
+        let requiredDirectories = [
+            executable.deletingLastPathComponent().path,
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+        ]
+        let existingDirectories = environment["PATH"]?
+            .split(separator: ":")
+            .map(String.init) ?? []
+        environment["PATH"] = (requiredDirectories + existingDirectories)
+            .reduce(into: [String]()) { paths, directory in
+                if !paths.contains(directory) {
+                    paths.append(directory)
+                }
+            }
+            .joined(separator: ":")
+        return environment
     }
 }
 

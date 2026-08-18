@@ -58,6 +58,8 @@ struct VibeBoardDiagnostic {
                 print("capabilities=not_yet_received")
             }
             await session.disconnect()
+        case .inputConfiguration:
+            try await probeInputConfiguration(descriptor: select(descriptors))
         case let .keys(duration):
             try await captureKeys(descriptor: select(descriptors), durationSeconds: duration)
         case .screen:
@@ -66,6 +68,34 @@ struct VibeBoardDiagnostic {
             try await uploadAndCommitImage(descriptor: select(descriptors), inputURL: inputURL)
         case let .record(outputURL, timeout):
             try await record(descriptor: select(descriptors), outputURL: outputURL, timeoutSeconds: timeout)
+        }
+    }
+
+    private static func probeInputConfiguration(descriptor: USBDeviceDescriptor) async throws {
+        let session = try USBSession(descriptor: descriptor)
+        let inputState = Task { () -> StateEvent? in
+            for await event in session.events {
+                guard case let .stateEvent(state) = event,
+                      state.event == "vk_input_state" else { continue }
+                return state
+            }
+            return nil
+        }
+        do {
+            _ = try await session.connect()
+            try await session.send(.interactionMode(.holdToTalk))
+            try await session.send(.voiceKey(.none))
+            try await Task.sleep(for: .milliseconds(750))
+            await session.disconnect()
+            let state = await inputState.value
+            guard state?.event == "vk_input_state" else {
+                throw USBSessionError.protocolFailure("input configuration was not acknowledged")
+            }
+            print("input_configuration=acknowledged")
+        } catch {
+            inputState.cancel()
+            await session.disconnect()
+            throw error
         }
     }
 

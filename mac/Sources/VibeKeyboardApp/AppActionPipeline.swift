@@ -34,8 +34,7 @@ actor ProductionHostActionAdapter: PermissionAuthorizing, InputInjecting, Applic
 
     func require(_ permission: InputPermission) async throws {
         guard permission == .inputInjection else { return }
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        guard AXIsProcessTrustedWithOptions(options) else {
+        guard AXIsProcessTrusted() else {
             throw ActionRoutingError.permissionDenied("Accessibility permission is required")
         }
     }
